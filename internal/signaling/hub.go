@@ -9,6 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/kidandcat/voicechat/internal/auth"
 	"github.com/kidandcat/voicechat/internal/channel"
+	rtc "github.com/kidandcat/voicechat/internal/webrtc"
 )
 
 var upgrader = websocket.Upgrader{
@@ -133,6 +134,7 @@ func (c *Client) readPump() {
 		GlobalHub.Unregister(c)
 		c.Conn.Close()
 		if chID > 0 {
+			cleanupWebRTC(chID, c.UserID)
 			broadcastChannelUpdate(chID)
 		}
 		broadcastPresence()
@@ -162,6 +164,9 @@ func handleMessage(c *Client, msg Message) {
 		json.Unmarshal(msg.Payload, &p)
 
 		oldCh := channel.GetUserChannel(c.UserID)
+		if oldCh > 0 {
+			cleanupWebRTC(oldCh, c.UserID)
+		}
 		channel.Join(p.ChannelID, c.UserID, c.Username)
 
 		if oldCh > 0 {
@@ -173,6 +178,7 @@ func handleMessage(c *Client, msg Message) {
 	case "leave_channel":
 		chID := channel.Leave(c.UserID)
 		if chID > 0 {
+			cleanupWebRTC(chID, c.UserID)
 			broadcastChannelUpdate(chID)
 		}
 		broadcastPresence()
@@ -198,7 +204,70 @@ func handleMessage(c *Client, msg Message) {
 		if chID > 0 {
 			broadcastChannelUpdate(chID)
 		}
+
+	case "webrtc_offer":
+		var p struct {
+			SDP string `json:"sdp"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			log.Printf("signaling: bad webrtc_offer from user %d: %v", c.UserID, err)
+			return
+		}
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		sfu := rtc.GetOrCreateSFU(chID, func(userID int64, data []byte) {
+			GlobalHub.SendTo(userID, data)
+		})
+		if err := sfu.HandleOffer(c.UserID, c.Username, p.SDP); err != nil {
+			log.Printf("signaling: webrtc offer failed for user %d: %v", c.UserID, err)
+		}
+
+	case "webrtc_answer":
+		var p struct {
+			SDP string `json:"sdp"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			return
+		}
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		sfu := rtc.GetOrCreateSFU(chID, func(userID int64, data []byte) {
+			GlobalHub.SendTo(userID, data)
+		})
+		if err := sfu.HandleAnswer(c.UserID, p.SDP); err != nil {
+			log.Printf("signaling: webrtc answer failed for user %d: %v", c.UserID, err)
+		}
+
+	case "ice_candidate":
+		var p struct {
+			Candidate json.RawMessage `json:"candidate"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			return
+		}
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		sfu := rtc.GetOrCreateSFU(chID, func(userID int64, data []byte) {
+			GlobalHub.SendTo(userID, data)
+		})
+		if err := sfu.HandleICECandidate(c.UserID, p.Candidate); err != nil {
+			log.Printf("signaling: ice candidate failed for user %d: %v", c.UserID, err)
+		}
 	}
+}
+
+func cleanupWebRTC(channelID int64, userID int64) {
+	sfu := rtc.GetOrCreateSFU(channelID, func(uid int64, data []byte) {
+		GlobalHub.SendTo(uid, data)
+	})
+	sfu.RemovePeer(userID)
+	rtc.RemoveSFU(channelID)
 }
 
 func broadcastChannelUpdate(channelID int64) {
