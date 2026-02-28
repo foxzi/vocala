@@ -8,3 +8,4 @@ voicechat.db-shm
 /tmp/
 .DS_Store
 server
+voicechat

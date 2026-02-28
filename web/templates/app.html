@@ -93,7 +93,7 @@
 {{define "channel-list"}}
 {{range .Channels}}
 <div class="channel-item mb-1 fade-in" data-channel-id="{{.ID}}">
-    <button onclick="joinChannel({{.ID}}, '{{.Name}}')"
+    <button data-ch-id="{{.ID}}" data-ch-name="{{.Name}}" onclick="joinChannel(+this.dataset.chId, this.dataset.chName)"
         class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-vc-hover transition group text-left">
         <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-vc-channel flex items-center justify-center group-hover:bg-vc-accent/20 transition">
             <svg class="w-4 h-4 text-vc-muted group-hover:text-vc-accent transition" fill="currentColor" viewBox="0 0 24 24">
