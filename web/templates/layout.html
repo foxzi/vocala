@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceChat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        vc: {
+                            bg: '#0f0f13',
+                            sidebar: '#16161d',
+                            channel: '#1c1c27',
+                            hover: '#24243a',
+                            accent: '#7c5cfc',
+                            accent2: '#5c8afc',
+                            green: '#43b581',
+                            red: '#f04747',
+                            yellow: '#faa61a',
+                            text: '#dcddde',
+                            muted: '#72767d',
+                            border: '#2a2a3a',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="https://unpkg.com/htmx-ext-ws@2.0.3/ws.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .speaking-ring { animation: pulse-ring 1.5s ease-in-out infinite; }
+        @keyframes pulse-ring {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 252, 0.4); }
+            50% { box-shadow: 0 0 0 8px rgba(124, 92, 252, 0); }
+        }
+        .fade-in { animation: fadeIn 0.2s ease-in; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body class="h-full bg-vc-bg text-vc-text dark">
+    {{block "content" .}}{{end}}
+</body>
+</html>

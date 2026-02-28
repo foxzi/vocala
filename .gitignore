@@ -1,0 +1,10 @@
+voicechat.db
+voicechat.db-wal
+voicechat.db-shm
+*.exe
+*.dll
+*.so
+*.dylib
+/tmp/
+.DS_Store
+server
