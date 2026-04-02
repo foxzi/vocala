@@ -75,6 +75,13 @@ func GetOrCreateSFU(channelID int64, sendMsg func(userID int64, msg []byte)) *SF
 	return s
 }
 
+// GetSFU returns the SFU for a channel or nil if it doesn't exist.
+func GetSFU(channelID int64) *SFU {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return sfus[channelID]
+}
+
 // RemoveSFU removes the SFU for a channel if it has no peers.
 func RemoveSFU(channelID int64) {
 	globalMu.Lock()
@@ -129,7 +136,7 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 		s.SendMessage(userID, data)
 
 		// Check if peer stopped sending video (screen share ended)
-		if hadVideo && !sdpHasVideoSending(offerSDP) {
+		if hadVideo && !SDPHasVideoSending(offerSDP) {
 			go s.cleanupVideoTrack(existingPeer, userID)
 		}
 
@@ -227,8 +234,8 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 	return nil
 }
 
-// sdpHasVideoSending checks if the SDP has an active video m-line sending data.
-func sdpHasVideoSending(sdp string) bool {
+// SDPHasVideoSending checks if the SDP has an active video m-line sending data.
+func SDPHasVideoSending(sdp string) bool {
 	lines := strings.Split(sdp, "\n")
 	inVideo := false
 	for _, line := range lines {
