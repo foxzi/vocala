@@ -9,3 +9,4 @@ vocipher.db-shm
 .DS_Store
 server
 vocipher
+nginx/certs/
