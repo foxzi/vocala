@@ -5,7 +5,10 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/intervalpli"
 	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
@@ -23,6 +26,7 @@ type Peer struct {
 	outputTracks      map[int64]*webrtc.TrackLocalStaticRTP // srcUserID -> local audio track
 	videoOutputTracks map[int64]*webrtc.TrackLocalStaticRTP // srcUserID -> local video track
 	mu                sync.Mutex
+	negoMu            sync.Mutex // serializes renegotiation per peer
 }
 
 // SFU manages all peer connections for a channel.
@@ -39,14 +43,57 @@ var (
 	sfus     = make(map[int64]*SFU) // channelID -> SFU
 )
 
-var api *webrtc.API
+var (
+	api     *webrtc.API
+	apiOnce sync.Once
+	natIP   string // external IP for NAT 1:1 mapping (Docker)
+)
 
-func init() {
-	m := &webrtc.MediaEngine{}
-	if err := m.RegisterDefaultCodecs(); err != nil {
-		log.Fatal("webrtc: failed to register codecs:", err)
-	}
-	api = webrtc.NewAPI(webrtc.WithMediaEngine(m))
+// SetNATIP sets the external IP address for WebRTC ICE candidates.
+// Must be called before any peer connections are created.
+// Required when running inside Docker so that ICE candidates
+// advertise the host IP instead of the container IP.
+func SetNATIP(ip string) {
+	natIP = ip
+	log.Printf("webrtc: NAT 1:1 IP set to %s", ip)
+}
+
+func getAPI() *webrtc.API {
+	apiOnce.Do(func() {
+		m := &webrtc.MediaEngine{}
+		if err := m.RegisterDefaultCodecs(); err != nil {
+			log.Fatal("webrtc: failed to register codecs:", err)
+		}
+
+		// Register interceptors for RTP/RTCP processing (required for Chrome simulcast extensions)
+		i := &interceptor.Registry{}
+		if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
+			log.Fatal("webrtc: failed to register interceptors:", err)
+		}
+
+		// Add periodic PLI interceptor for video keyframe requests
+		pliFactory, err := intervalpli.NewReceiverInterceptor()
+		if err != nil {
+			log.Fatal("webrtc: failed to create PLI interceptor:", err)
+		}
+		i.Add(pliFactory)
+
+		opts := []func(*webrtc.API){
+			webrtc.WithMediaEngine(m),
+			webrtc.WithInterceptorRegistry(i),
+		}
+
+		// If NAT IP is set, configure SettingEngine for Docker/NAT environments
+		if natIP != "" {
+			s := webrtc.SettingEngine{}
+			s.SetNAT1To1IPs([]string{natIP}, webrtc.ICECandidateTypeHost)
+			s.SetEphemeralUDPPortRange(50000, 50100)
+			opts = append(opts, webrtc.WithSettingEngine(s))
+		}
+
+		api = webrtc.NewAPI(opts...)
+	})
+	return api
 }
 
 // TURNCredentials holds TURN server credentials for ICE config.
@@ -170,7 +217,7 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 	}
 
 	// New peer: create new PeerConnection
-	pc, err := api.NewPeerConnection(newPeerConnectionConfig())
+	pc, err := getAPI().NewPeerConnection(newPeerConnectionConfig())
 	if err != nil {
 		return err
 	}
@@ -326,6 +373,8 @@ func (s *SFU) addExistingTracksForPeer(peer *Peer, userID int64) {
 				log.Printf("webrtc: failed to add existing video track from user %d to user %d: %v", srcID, userID, err)
 			} else {
 				needsRenegotiation = true
+				// Request keyframe so the new receiver can start decoding
+				s.sendPLI(existingPeer, existingPeer.videoTrack)
 			}
 		}
 	}
@@ -448,12 +497,8 @@ func (s *SFU) handleVideoTrack(peer *Peer, userID int64, username string, track 
 	}
 	s.mu.RUnlock()
 
-	// Send PLI to request a keyframe from the sender
-	if err := peer.PC.WriteRTCP([]rtcp.Packet{
-		&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},
-	}); err != nil {
-		log.Printf("webrtc: failed to send PLI for user %d: %v", userID, err)
-	}
+	// Request initial keyframe from the sender
+	s.sendPLI(peer, track)
 
 	// Forward RTP packets (larger buffer for video)
 	buf := make([]byte, 4096)
@@ -503,6 +548,18 @@ func (s *SFU) handleVideoTrack(peer *Peer, userID int64, username string, track 
 		s.renegotiate(otherPeer)
 	}
 	s.mu.RUnlock()
+}
+
+// sendPLI sends a Picture Loss Indication to request a keyframe.
+func (s *SFU) sendPLI(peer *Peer, track *webrtc.TrackRemote) {
+	if peer.PC.ConnectionState() == webrtc.PeerConnectionStateClosed {
+		return
+	}
+	if err := peer.PC.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},
+	}); err != nil {
+		log.Printf("webrtc: failed to send PLI for user %d: %v", peer.UserID, err)
+	}
 }
 
 // addTrackForPeer creates a local track on destPeer that will receive RTP from srcTrack.
@@ -556,7 +613,32 @@ func (s *SFU) addVideoTrackForPeer(destPeer *Peer, srcUserID int64, srcTrack *we
 }
 
 // renegotiate sends a new offer to a peer after tracks change.
+// Serialized per-peer via negoMu. Waits for stable signaling state.
 func (s *SFU) renegotiate(peer *Peer) {
+	peer.negoMu.Lock()
+	defer peer.negoMu.Unlock()
+
+	if peer.PC.ConnectionState() == webrtc.PeerConnectionStateClosed {
+		return
+	}
+
+	// If not stable, wait briefly then retry — avoids deadlock with RLock held by callers
+	for attempts := 0; attempts < 50; attempts++ {
+		if peer.PC.SignalingState() == webrtc.SignalingStateStable {
+			break
+		}
+		if attempts == 0 {
+			log.Printf("webrtc: waiting for stable signaling state for user %d (current: %s)", peer.UserID, peer.PC.SignalingState())
+		}
+		peer.negoMu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+		peer.negoMu.Lock()
+	}
+	if peer.PC.SignalingState() != webrtc.SignalingStateStable {
+		log.Printf("webrtc: renegotiation timeout for user %d, signaling state: %s", peer.UserID, peer.PC.SignalingState())
+		return
+	}
+
 	offer, err := peer.PC.CreateOffer(nil)
 	if err != nil {
 		log.Printf("webrtc: renegotiate offer failed for user %d: %v", peer.UserID, err)
@@ -568,6 +650,7 @@ func (s *SFU) renegotiate(peer *Peer) {
 		return
 	}
 
+	log.Printf("webrtc: sending renegotiation offer to user %d", peer.UserID)
 	data, _ := json.Marshal(map[string]any{
 		"type": "webrtc_offer",
 		"payload": map[string]any{
@@ -587,6 +670,10 @@ func (s *SFU) HandleAnswer(userID int64, answerSDP string) error {
 		return nil
 	}
 
+	peer.negoMu.Lock()
+	defer peer.negoMu.Unlock()
+
+	log.Printf("webrtc: received answer from user %d, signaling state: %s", userID, peer.PC.SignalingState())
 	return peer.PC.SetRemoteDescription(webrtc.SessionDescription{
 		Type: webrtc.SDPTypeAnswer,
 		SDP:  answerSDP,
