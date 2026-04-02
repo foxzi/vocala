@@ -442,13 +442,12 @@ async function startWebRTC() {
         // Setup VAD
         setupVAD(localStream);
 
-        // Create peer connection
-        peerConnection = new RTCPeerConnection({
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-            ],
-        });
+        // Create peer connection with server-provided ICE config (includes TURN if configured)
+        const iceServers = window.VOCIPHER_ICE_SERVERS || [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+        ];
+        peerConnection = new RTCPeerConnection({ iceServers });
 
         // Add audio track
         localStream.getTracks().forEach(track => {

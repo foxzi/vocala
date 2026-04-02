@@ -88,6 +88,9 @@
     </div>
 </div>
 
+<script>
+    window.VOCIPHER_ICE_SERVERS = {{toJSON .ICEServers}};
+</script>
 <script src="/static/js/app.js?v={{.CacheBust}}"></script>
 {{end}}
 
