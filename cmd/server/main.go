@@ -166,6 +166,11 @@ func main() {
 	}
 	database.Init(dbPath)
 
+	// Set NAT IP for WebRTC ICE candidates (required in Docker)
+	if natIP := os.Getenv("VOCIPHER_NAT_IP"); natIP != "" {
+		rtc.SetNATIP(natIP)
+	}
+
 	// Start embedded TURN server if public IP is configured
 	turnPublicIP := os.Getenv("VOCIPHER_TURN_IP")
 	if turnPublicIP != "" {
