@@ -187,6 +187,30 @@ function updatePresence(channels) {
     }
 }
 
+// ─── Mobile Sidebar ───────────────────────────────────────────
+
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('sidebar-overlay');
+    const isOpen = !sidebar.classList.contains('-translate-x-full');
+    if (isOpen) {
+        sidebar.classList.add('-translate-x-full');
+        overlay.classList.add('hidden');
+    } else {
+        sidebar.classList.remove('-translate-x-full');
+        overlay.classList.remove('hidden');
+    }
+}
+
+function closeSidebarOnMobile() {
+    if (window.innerWidth < 768) { // md breakpoint
+        const sidebar = document.getElementById('sidebar');
+        const overlay = document.getElementById('sidebar-overlay');
+        sidebar.classList.add('-translate-x-full');
+        overlay.classList.add('hidden');
+    }
+}
+
 // ─── Channel Join/Leave ───────────────────────────────────────
 
 function joinChannel(channelID, channelName) {
@@ -203,6 +227,11 @@ function joinChannel(channelID, channelName) {
 
     currentChannelID = channelID;
     sendWS({ type: 'join_channel', payload: { channel_id: channelID } });
+
+    // Close sidebar on mobile and update mobile header
+    closeSidebarOnMobile();
+    const mobileChName = document.getElementById('mobile-channel-name');
+    if (mobileChName) mobileChName.textContent = channelName;
 
     const mainContent = document.getElementById('main-content');
     mainContent.innerHTML = `
@@ -367,6 +396,9 @@ function leaveChannel() {
     document.querySelectorAll('.channel-item').forEach(el => {
         el.classList.remove('bg-vc-hover/50');
     });
+
+    const mobileChName = document.getElementById('mobile-channel-name');
+    if (mobileChName) mobileChName.textContent = 'Select a channel';
 
     document.getElementById('main-content').innerHTML = `
         <div class="text-center text-vc-muted">
