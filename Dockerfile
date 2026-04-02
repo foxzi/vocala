@@ -23,5 +23,6 @@ RUN mkdir -p /app/data && chown vocipher:vocipher /app/data
 USER vocipher
 
 EXPOSE 8090
+EXPOSE 3478/udp
 
 CMD ["./vocipher"]
