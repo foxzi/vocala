@@ -296,20 +296,6 @@ function joinChannel(channelID, channelName) {
                     </div>
                 </div>
             </div>
-                    <div class="relative w-16 h-2 bg-vc-bg rounded-full overflow-hidden border border-vc-border">
-                        <div id="vad-meter" class="h-full rounded-full bg-vc-muted/50 transition-all duration-75" style="width:0%"></div>
-                        <div id="vad-threshold-marker" class="absolute top-0 h-full w-0.5 bg-vc-accent/80" style="left:${Math.min(100, (vadThreshold / 80) * 100)}%"></div>
-                    </div>
-                </div>
-                <button onclick="togglePTT()" id="ptt-btn"
-                    class="flex items-center gap-2 px-4 py-2 rounded-lg ${pushToTalk ? 'bg-vc-accent/20 text-vc-accent' : 'bg-vc-channel hover:bg-vc-hover text-vc-muted'} transition text-sm">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
-                    </svg>
-                    PTT ${pushToTalk ? 'ON' : 'OFF'}
-                </button>
-                <div class="text-xs text-vc-muted" id="ptt-hint">${pushToTalk ? 'Hold Space to talk' : ''}</div>
-            </div>
         </div>
     `;
 
