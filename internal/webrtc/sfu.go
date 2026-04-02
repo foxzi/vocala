@@ -49,13 +49,39 @@ func init() {
 	api = webrtc.NewAPI(webrtc.WithMediaEngine(m))
 }
 
+// TURNCredentials holds TURN server credentials for ICE config.
+type TURNCredentials struct {
+	URI      string
+	Username string
+	Password string
+}
+
+// turnCreds stores the global TURN credentials (set once at startup).
+var turnCreds *TURNCredentials
+
+// SetTURNCredentials configures the TURN server credentials for all peer connections.
+func SetTURNCredentials(uri, username, password string) {
+	turnCreds = &TURNCredentials{URI: uri, Username: username, Password: password}
+}
+
+// GetTURNCredentials returns the current TURN credentials, or nil if not configured.
+func GetTURNCredentials() *TURNCredentials {
+	return turnCreds
+}
+
 func newPeerConnectionConfig() webrtc.Configuration {
-	return webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{URLs: []string{"stun:stun.l.google.com:19302"}},
-			{URLs: []string{"stun:stun1.l.google.com:19302"}},
-		},
+	iceServers := []webrtc.ICEServer{
+		{URLs: []string{"stun:stun.l.google.com:19302"}},
+		{URLs: []string{"stun:stun1.l.google.com:19302"}},
 	}
+	if turnCreds != nil {
+		iceServers = append(iceServers, webrtc.ICEServer{
+			URLs:       []string{turnCreds.URI},
+			Username:   turnCreds.Username,
+			Credential: turnCreds.Password,
+		})
+	}
+	return webrtc.Configuration{ICEServers: iceServers}
 }
 
 // GetOrCreateSFU returns the SFU for a channel, creating one if needed.
