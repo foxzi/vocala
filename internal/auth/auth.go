@@ -2,7 +2,6 @@ package auth
 
 import (
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"net/http"
@@ -59,12 +58,20 @@ func CreateSession(userID int64) (string, error) {
 	}
 	token := hex.EncodeToString(b)
 
-	_, err := database.DB.Exec("INSERT INTO sessions (token, user_id) VALUES (?, ?)", token, userID)
+	_, err := database.DB.Exec(
+		"INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))",
+		token, userID,
+	)
 	if err != nil {
 		return "", err
 	}
 
 	return token, nil
+}
+
+// CleanExpiredSessions removes expired sessions from the database.
+func CleanExpiredSessions() {
+	database.DB.Exec("DELETE FROM sessions WHERE expires_at < datetime('now')")
 }
 
 func DeleteSession(token string) {
@@ -82,12 +89,10 @@ func UserFromRequest(r *http.Request) *User {
 func UserFromToken(token string) *User {
 	var user User
 	err := database.DB.QueryRow(
-		"SELECT u.id, u.username FROM users u JOIN sessions s ON s.user_id = u.id WHERE s.token = ?", token,
+		"SELECT u.id, u.username FROM users u JOIN sessions s ON s.user_id = u.id WHERE s.token = ? AND s.expires_at > datetime('now')",
+		token,
 	).Scan(&user.ID, &user.Username)
 	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
 		return nil
 	}
 	return &user
