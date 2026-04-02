@@ -21,6 +21,7 @@
         <!-- Create Channel -->
         <div class="p-3 border-b border-vc-border">
             <form hx-post="/channels" hx-target="#channel-list" hx-swap="innerHTML" hx-on::after-request="this.reset()">
+                <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
                 <div class="flex gap-2">
                     <input type="text" name="name" required placeholder="New channel..."
                         class="flex-1 px-3 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition">
