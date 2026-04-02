@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -43,7 +44,7 @@ var funcMap = template.FuncMap{
 
 func loadTemplates() map[string]*template.Template {
 	layoutFile := filepath.Join("web", "templates", "layout.html")
-	pages := []string{"login.html", "register.html", "app.html"}
+	pages := []string{"login.html", "register.html", "app.html", "admin.html"}
 	t := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
 		t[page] = template.Must(
@@ -205,6 +206,14 @@ func main() {
 	mux.HandleFunc("/channels", requireAuth(csrfProtect(handleChannels)))
 	mux.HandleFunc("/channels/delete", requireAuth(csrfProtect(handleDeleteChannel)))
 
+	// Admin routes
+	mux.HandleFunc("/admin", requireAdmin(handleAdmin))
+	mux.HandleFunc("/admin/users/activate", requireAdmin(csrfProtect(handleAdminActivate)))
+	mux.HandleFunc("/admin/users/deactivate", requireAdmin(csrfProtect(handleAdminDeactivate)))
+	mux.HandleFunc("/admin/users/make-admin", requireAdmin(csrfProtect(handleAdminMakeAdmin)))
+	mux.HandleFunc("/admin/users/revoke-admin", requireAdmin(csrfProtect(handleAdminRevokeAdmin)))
+	mux.HandleFunc("/admin/users/delete", requireAdmin(csrfProtect(handleAdminDeleteUser)))
+
 	// WebSocket
 	mux.HandleFunc("/ws", signaling.HandleWebSocket)
 
@@ -253,10 +262,25 @@ func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			http.Redirect(w, r, "/login", http.StatusSeeOther)
 			return
 		}
+		if !user.IsActive {
+			http.Redirect(w, r, "/login", http.StatusSeeOther)
+			return
+		}
 		// Store user in context to avoid double DB query (#15)
 		ctx := context.WithValue(r.Context(), userCtxKey, user)
 		next(w, r.WithContext(ctx))
 	}
+}
+
+func requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		user := userFromContext(r)
+		if user == nil || !user.IsAdmin {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	})
 }
 
 func userFromContext(r *http.Request) *auth.User {
@@ -296,6 +320,14 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 
 	user, err := auth.Login(username, password)
+	if errors.Is(err, auth.ErrNotActive) {
+		csrfToken := setCSRFCookie(w, r)
+		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{
+			"Error":     "Your account is pending activation by an administrator",
+			"CSRFToken": csrfToken,
+		})
+		return
+	}
 	if err != nil {
 		csrfToken := setCSRFCookie(w, r)
 		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{
@@ -478,14 +510,13 @@ func handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// #3 — authorization: only the creator can delete
 	user := userFromContext(r)
 	ch, err := channel.GetByID(id)
 	if err != nil {
 		http.Error(w, "channel not found", http.StatusNotFound)
 		return
 	}
-	if ch.CreatedBy != user.ID {
+	if ch.CreatedBy != user.ID && !user.IsAdmin {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -509,4 +540,84 @@ func handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 		"CSRFToken": csrfToken,
 	}
 	templates["app.html"].ExecuteTemplate(w, "channel-list", data)
+}
+
+// --- Admin handlers ---
+
+func handleAdmin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	users, err := auth.ListUsers()
+	if err != nil {
+		log.Printf("failed to list users: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	csrfToken := setCSRFCookie(w, r)
+	data := map[string]any{
+		"Users":     users,
+		"CSRFToken": csrfToken,
+		"Flash":     r.URL.Query().Get("flash"),
+	}
+	templates["admin.html"].ExecuteTemplate(w, "layout.html", data)
+}
+
+func adminUserAction(w http.ResponseWriter, r *http.Request, action func(int64) error, flash string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	userID, err := strconv.ParseInt(r.FormValue("user_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid user_id", http.StatusBadRequest)
+		return
+	}
+
+	// Prevent admin from modifying themselves
+	currentUser := userFromContext(r)
+	if currentUser.ID == userID {
+		http.Redirect(w, r, "/admin?flash=Cannot+modify+your+own+account", http.StatusSeeOther)
+		return
+	}
+
+	if err := action(userID); err != nil {
+		log.Printf("admin action failed for user %d: %v", userID, err)
+	}
+
+	http.Redirect(w, r, "/admin?flash="+flash, http.StatusSeeOther)
+}
+
+func handleAdminActivate(w http.ResponseWriter, r *http.Request) {
+	adminUserAction(w, r, func(id int64) error {
+		return auth.SetUserActive(id, true)
+	}, "User+activated")
+}
+
+func handleAdminDeactivate(w http.ResponseWriter, r *http.Request) {
+	adminUserAction(w, r, func(id int64) error {
+		return auth.SetUserActive(id, false)
+	}, "User+deactivated")
+}
+
+func handleAdminMakeAdmin(w http.ResponseWriter, r *http.Request) {
+	adminUserAction(w, r, func(id int64) error {
+		return auth.SetUserAdmin(id, true)
+	}, "Admin+granted")
+}
+
+func handleAdminRevokeAdmin(w http.ResponseWriter, r *http.Request) {
+	adminUserAction(w, r, func(id int64) error {
+		return auth.SetUserAdmin(id, false)
+	}, "Admin+revoked")
+}
+
+func handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	adminUserAction(w, r, func(id int64) error {
+		return auth.DeleteUser(id)
+	}, "User+deleted")
 }
