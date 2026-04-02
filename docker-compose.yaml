@@ -1,0 +1,14 @@
+services:
+  vocipher:
+    build: .
+    ports:
+      - "8090:8090"
+    environment:
+      - VOCIPHER_DB_PATH=/app/data/vocipher.db
+      - VOCIPHER_ADDR=:8090
+    volumes:
+      - vocipher-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  vocipher-data:
