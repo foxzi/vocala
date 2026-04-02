@@ -1,16 +1,31 @@
 services:
   vocipher:
     build: .
+    expose:
+      - "8090"
     ports:
-      - "8090:8090"
-      - "3478:3478/udp"    # TURN server
+      - "3478:3478/udp"        # TURN server
+      - "50000-50100:50000-50100/udp"  # WebRTC UDP media ports
     environment:
       - VOCIPHER_DB_PATH=/app/data/vocipher.db
       - VOCIPHER_ADDR=:8090
+      - VOCIPHER_NAT_IP=${VOCIPHER_NAT_IP:-}
       # Set to your server's public IP to enable built-in TURN
       # - VOCIPHER_TURN_IP=203.0.113.1
     volumes:
       - vocipher-data:/app/data
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - vocipher
     restart: unless-stopped
 
 volumes:
