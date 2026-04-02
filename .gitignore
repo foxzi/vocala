@@ -10,3 +10,4 @@ vocipher.db-shm
 server
 vocipher
 nginx/certs/
+.env
