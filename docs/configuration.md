@@ -11,6 +11,7 @@ Vocipher is configured entirely through environment variables. No config files n
 | `VOCIPHER_ADDR` | `:8090` | HTTP server listen address (e.g. `:8080`, `127.0.0.1:8090`) |
 | `VOCIPHER_DB_PATH` | `vocipher.db` | Path to SQLite database file |
 | `VOCIPHER_TURN_IP` | *(disabled)* | Public IP address for the embedded TURN server. If not set, TURN is disabled and only STUN is used |
+| `VOCIPHER_NAT_IP` | *(disabled)* | Host IP for WebRTC ICE candidates. Required when running in Docker so peers can reach the server |
 
 ### Examples
 
@@ -34,11 +35,14 @@ VOCIPHER_TURN_IP=203.0.113.1 ./vocipher
 # HTTP on :8090, TURN on UDP :3478
 ```
 
-**Docker:**
+**Docker with HTTPS:**
 
 ```bash
+cp .env.example .env
+# Edit .env: set VOCIPHER_NAT_IP to your host IP
+./nginx/generate-cert.sh ./nginx/certs
 docker compose up -d
-# Configure via docker-compose.yaml environment section
+# Access at https://<your-ip>
 ```
 
 ### TURN Server
@@ -100,6 +104,7 @@ Vocipher настраивается полностью через перемен
 | `VOCIPHER_ADDR` | `:8090` | Адрес HTTP-сервера (например `:8080`, `127.0.0.1:8090`) |
 | `VOCIPHER_DB_PATH` | `vocipher.db` | Путь к файлу SQLite базы данных |
 | `VOCIPHER_TURN_IP` | *(выключен)* | Публичный IP для встроенного TURN-сервера. Если не задан, используется только STUN |
+| `VOCIPHER_NAT_IP` | *(выключен)* | IP хоста для ICE candidates WebRTC. Обязателен при запуске в Docker |
 
 ### Примеры
 

@@ -58,8 +58,11 @@ User B (audio) ──RTP──> SFU ──RTP──> User A (playback)
 **Key properties:**
 - No transcoding -- raw RTP packet relay
 - Opus codec for audio, VP8/VP9/H.264 for video (screen share)
-- PLI (Picture Loss Indication) for keyframe requests on video
-- Dynamic renegotiation when peers join/leave or start/stop screen sharing
+- Interceptor registry for Chrome simulcast RTP extension support
+- Automatic PLI (Picture Loss Indication) via `intervalpli` interceptor
+- Serialized per-peer renegotiation with stable state waiting
+- NAT 1:1 IP mapping for Docker deployments (`VOCIPHER_NAT_IP`)
+- Ephemeral UDP port range 50000-50100 for Docker port mapping
 
 ### WebSocket Signaling Protocol
 
@@ -99,6 +102,8 @@ users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
+    is_admin      INTEGER NOT NULL DEFAULT 0,
+    is_active     INTEGER NOT NULL DEFAULT 0,
     created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 )
 
@@ -139,8 +144,10 @@ TURN credentials are generated automatically at startup and injected into the IC
 - **HTMX** -- Used for channel creation/deletion (POST with partial HTML swap)
 - **WebSocket** -- Raw JS `WebSocket` for real-time signaling
 - **WebRTC** -- Browser `RTCPeerConnection` API for audio/video
-- **VAD** -- Web Audio API `AnalyserNode` for voice activity detection
+- **VAD** -- Web Audio API `AnalyserNode` + `GainNode` for voice activity detection. Audio is routed through GainNode (gain=0 when silent, gain=1 when speaking) instead of disabling the track, which fixes mobile browser compatibility
 - **Screen Share** -- `getDisplayMedia()` with periodic JPEG thumbnail preview
+- **Mobile responsive** -- Collapsible sidebar, compact icon-only toolbar, auto-close on channel join
+- **Speaking indicators** -- Green ring on avatar + animated bars when speaking (self and others)
 
 ---
 
@@ -196,5 +203,14 @@ SQLite с WAL-режимом и включёнными foreign keys. Три та
 - Без шага сборки -- vanilla JS, Tailwind CSS через CDN, HTMX
 - WebSocket для real-time сигнализации
 - WebRTC `RTCPeerConnection` для аудио/видео
-- VAD через Web Audio API
+- VAD через Web Audio API (`AnalyserNode` + `GainNode`) -- управление громкостью вместо отключения трека (фикс мобильных браузеров)
 - Демонстрация экрана через `getDisplayMedia()`
+- Адаптивная мобильная вёрстка -- сворачиваемый сайдбар, компактная панель управления
+- Индикаторы говорящих -- зелёное кольцо + анимированные полоски
+
+### Админ-панель
+
+- `/admin` -- таблица пользователей с управлением
+- Активация/деактивация, назначение/снятие админа, удаление
+- Первый зарегистрированный пользователь автоматически становится админом
+- Новые пользователи создаются в статусе Pending

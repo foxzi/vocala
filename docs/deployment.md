@@ -144,16 +144,35 @@ sudo ufw allow 443/tcp
 sudo ufw allow 3478/udp
 ```
 
-### Docker Compose with Nginx
+### Docker Compose with Nginx (included)
 
-If you want Nginx in the same Docker Compose, you can add it as a service. However, the simpler approach is to run Nginx on the host and proxy to the container.
+The default `docker-compose.yaml` includes both Vocipher and Nginx with HTTPS:
+
+```bash
+# 1. Generate self-signed certificate
+./nginx/generate-cert.sh ./nginx/certs
+
+# 2. Configure host IP
+cp .env.example .env
+# Edit .env: set VOCIPHER_NAT_IP=<your-host-ip>
+
+# 3. Start
+docker compose up -d
+
+# Access at https://<your-host-ip>
+```
+
+The `.env` file is required for WebRTC to work in Docker -- without `VOCIPHER_NAT_IP`, ICE candidates will advertise the container's internal IP and peers won't be able to connect.
 
 ### Ports Summary
 
 | Component | Default Port | Protocol | Configurable |
 |-----------|-------------|----------|--------------|
-| HTTP server | 8090 | TCP | `VOCIPHER_ADDR` |
+| HTTP server | 8090 | TCP | `VOCIPHER_ADDR` (internal) |
+| Nginx HTTP | 80 | TCP | docker-compose.yaml |
+| Nginx HTTPS | 443 | TCP | docker-compose.yaml |
 | TURN server | 3478 | UDP | Not yet (hardcoded) |
+| WebRTC media | 50000-50100 | UDP | sfu.go `SetEphemeralUDPPortRange` |
 
 ### Health Check
 

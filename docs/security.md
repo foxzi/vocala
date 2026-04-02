@@ -18,7 +18,7 @@ All state-changing POST requests require a CSRF token. The token is:
 - Embedded in HTML forms as a hidden `<input>` field
 - Validated server-side by comparing the cookie value with the form field value
 
-Protected endpoints: `/login`, `/register`, `/channels`, `/channels/delete`.
+Protected endpoints: `/login`, `/register`, `/channels`, `/channels/delete`, `/admin/users/*`.
 
 ### WebSocket Security
 
@@ -43,9 +43,13 @@ All responses include:
 
 ### Authorization
 
-- **Channel deletion:** Only the user who created a channel can delete it
-- **Channel creation:** Any authenticated user can create channels
-- **Voice channels:** Any authenticated user can join any channel
+- **User activation:** New users must be activated by an admin before they can log in
+- **First user auto-admin:** The first registered user is automatically admin and active
+- **Admin panel:** Only users with `is_admin=1` can access `/admin`
+- **Channel deletion:** Only the creator or an admin can delete a channel
+- **Channel creation:** Any active authenticated user can create channels
+- **Voice channels:** Any active authenticated user can join any channel
+- **Self-protection:** Admins cannot modify their own account (prevents self-deactivation)
 
 ### XSS Prevention
 
@@ -96,7 +100,7 @@ All database queries use parameterized statements (`?` placeholders). No string 
 
 Все POST-запросы, изменяющие состояние, требуют CSRF-токен. Токен хранится в отдельной куке `csrf_token` и дублируется в скрытом поле формы. Сервер сравнивает оба значения.
 
-Защищённые эндпоинты: `/login`, `/register`, `/channels`, `/channels/delete`.
+Защищённые эндпоинты: `/login`, `/register`, `/channels`, `/channels/delete`, `/admin/users/*`.
 
 ### Безопасность WebSocket
 
@@ -118,9 +122,13 @@ IP-based ограничение скорости на всех HTTP-эндпои
 
 ### Авторизация
 
-- **Удаление каналов:** Может только создатель канала
-- **Создание каналов:** Любой аутентифицированный пользователь
-- **Голосовые каналы:** Любой аутентифицированный пользователь может подключиться
+- **Активация пользователей:** Новые пользователи должны быть активированы админом
+- **Первый пользователь:** Автоматически становится админом и активируется
+- **Админ-панель:** Доступна только пользователям с `is_admin=1`
+- **Удаление каналов:** Может создатель канала или админ
+- **Создание каналов:** Любой активный аутентифицированный пользователь
+- **Голосовые каналы:** Любой активный аутентифицированный пользователь
+- **Самозащита:** Админ не может деактивировать/удалить свой аккаунт
 
 ### Предотвращение XSS
 

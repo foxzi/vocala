@@ -2,7 +2,7 @@
 
 > This is a fork of [kidandcat/vocipher](https://github.com/kidandcat/vocipher) -- a self-hosted voice chat server.
 > The original project provides a lightweight, single-binary alternative to Discord focused on voice communication.
-> This fork adds security hardening, admin panel, embedded TURN server, Docker support and documentation.
+> This fork adds security hardening, admin panel, embedded TURN server, Docker + Nginx HTTPS support, mobile layout and documentation.
 
 ## What's Changed in This Fork
 
@@ -36,12 +36,36 @@
 - **Server-to-client config** -- ICE servers (STUN + TURN) injected into the page via template
 - Activated by setting `VOCIPHER_TURN_IP` environment variable
 
+### WebRTC Improvements
+
+- **Interceptor registry** -- Proper RTP extension handling for Chrome simulcast support
+- **Automatic PLI** -- Periodic keyframe requests via `intervalpli` interceptor for reliable video
+- **NAT 1:1 mapping** -- `VOCIPHER_NAT_IP` for Docker deployments (ICE candidates advertise host IP)
+- **Serialized renegotiation** -- Per-peer mutex prevents concurrent offer/answer conflicts
+- **Screen share fixes** -- Video container survives renegotiation, stream updated in place
+
+### Voice Activity Detection
+
+- **GainNode-based VAD** -- Audio routed through Web Audio API GainNode instead of track.enabled, fixing mobile audio
+- **Threshold marker** -- Visual marker on level meter showing the activation threshold
+- **Speaking indicators** -- Green ring + animated bars on your avatar when speaking; green glow + "Speaking" label on other users' cards
+- **Sensitivity slider** -- Adjustable VAD threshold (1-60), lower = more sensitive
+
 ### Infrastructure
 
-- **Docker** -- Multi-stage Dockerfile, docker-compose.yaml with named volume for DB persistence
+- **Docker + Nginx HTTPS** -- Multi-stage Dockerfile, Nginx reverse proxy with self-signed certificate
+- **Self-signed cert generator** -- `nginx/generate-cert.sh` auto-detects local IP for SAN
+- **`.env` configuration** -- `VOCIPHER_NAT_IP` via `.env` file for Docker deployments
+- **UDP port range** -- Ports 50000-50100 exposed for WebRTC media in Docker
 - **Graceful shutdown** -- Signal handling (SIGINT/SIGTERM) with 10-second timeout
-- **Configurable** -- `VOCIPHER_ADDR`, `VOCIPHER_DB_PATH`, `VOCIPHER_TURN_IP` environment variables
-- **Server timeouts** -- Read (15s), Write (30s), Idle (120s) timeouts on HTTP server
+- **Server timeouts** -- Read (15s), Write (30s), Idle (120s) on HTTP server
+
+### Mobile UI
+
+- **Responsive sidebar** -- Collapsible sidebar on mobile with hamburger menu
+- **Compact toolbar** -- Icon-only buttons on mobile, sensitivity slider on second row
+- **Auto-close** -- Sidebar closes when joining a channel on mobile
+- **Mobile header** -- Shows current channel name
 
 ### Code Quality
 
@@ -54,13 +78,14 @@
 
 - **WebRTC SFU** -- Low-latency voice powered by [Pion WebRTC](https://github.com/pion/webrtc)
 - **Built-in TURN server** -- Embedded [Pion TURN](https://github.com/pion/turn) for NAT traversal
-- **Voice Activity Detection** -- Real-time VAD with visual audio level meter
+- **Voice Activity Detection** -- GainNode-based VAD with visual level meter and threshold marker
 - **Push-to-Talk** -- Optional PTT mode activated with spacebar
-- **Screen Sharing** -- Share your screen with live preview thumbnails
+- **Screen Sharing** -- Share your screen with live preview thumbnails (Firefox + Chrome)
 - **Channels** -- Voice channels with real-time presence and user counts
 - **Admin Panel** -- User management with manual activation
 - **Authentication** -- bcrypt + session cookies + CSRF protection
 - **Single Binary** -- SQLite database, embedded TURN, one process to run
+- **Mobile Responsive** -- Collapsible sidebar, compact controls on small screens
 - **Modern UI** -- Dark-themed interface built with HTMX and Tailwind CSS
 
 ## Quick Start
@@ -74,13 +99,24 @@ make build
 ./vocipher
 ```
 
-### Docker
+### Docker with HTTPS
 
 ```bash
+git clone https://github.com/foxzi/vocipher.git
+cd vocipher
+
+# Generate self-signed certificate
+./nginx/generate-cert.sh ./nginx/certs
+
+# Configure host IP for WebRTC
+cp .env.example .env
+# Edit .env and set VOCIPHER_NAT_IP to your machine's IP
+
+# Start
 docker compose up -d
 ```
 
-The server starts at `http://localhost:8090`. The first registered user becomes the admin.
+Access at `https://<your-ip>`. The first registered user becomes the admin.
 
 ## Configuration
 
@@ -89,6 +125,7 @@ The server starts at `http://localhost:8090`. The first registered user becomes 
 | `VOCIPHER_ADDR` | `:8090` | HTTP listen address |
 | `VOCIPHER_DB_PATH` | `vocipher.db` | Path to SQLite database file |
 | `VOCIPHER_TURN_IP` | *(disabled)* | Public IP for built-in TURN server |
+| `VOCIPHER_NAT_IP` | *(disabled)* | Host IP for WebRTC ICE candidates (required in Docker) |
 
 See [docs/configuration.md](docs/configuration.md) for details.
 
