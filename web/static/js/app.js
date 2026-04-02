@@ -236,20 +236,20 @@ function joinChannel(channelID, channelName) {
     const mainContent = document.getElementById('main-content');
     mainContent.innerHTML = `
         <div class="w-full h-full flex flex-col">
-            <div class="px-6 py-4 border-b border-vc-border flex items-center gap-3">
-                <svg class="w-6 h-6 text-vc-accent" fill="currentColor" viewBox="0 0 24 24">
+            <div class="px-4 md:px-6 py-3 border-b border-vc-border flex items-center gap-2 md:gap-3">
+                <svg class="w-5 h-5 md:w-6 md:h-6 text-vc-accent flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
                     <path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/>
                 </svg>
-                <h2 class="text-xl font-bold">${escapeHTML(channelName)}</h2>
-                <div id="rtc-status" class="flex items-center gap-1.5 ml-4">
+                <h2 class="text-base md:text-xl font-bold truncate">${escapeHTML(channelName)}</h2>
+                <div id="rtc-status" class="flex items-center gap-1.5 ml-2 flex-shrink-0">
                     <div class="w-2 h-2 rounded-full bg-vc-yellow animate-pulse"></div>
                     <span class="text-xs text-vc-yellow">Connecting...</span>
                 </div>
-                <button onclick="leaveChannel()" class="ml-auto px-4 py-1.5 bg-vc-red/20 hover:bg-vc-red/30 text-vc-red text-sm font-medium rounded-lg transition">
-                    Leave Channel
+                <button onclick="leaveChannel()" class="ml-auto px-3 py-1.5 bg-vc-red/20 hover:bg-vc-red/30 text-vc-red text-xs md:text-sm font-medium rounded-lg transition flex-shrink-0">
+                    Leave
                 </button>
             </div>
-            <div class="flex-1 flex flex-col overflow-y-auto p-8">
+            <div class="flex-1 flex flex-col overflow-y-auto p-3 md:p-8">
                 <div id="screen-share-anchor"></div>
                 <div class="flex-1 flex items-center justify-center" id="channel-view-users">
                     <div class="text-center text-vc-muted">
@@ -257,29 +257,45 @@ function joinChannel(channelID, channelName) {
                     </div>
                 </div>
             </div>
-            <div class="px-6 py-3 border-t border-vc-border bg-vc-sidebar/50 flex items-center justify-center gap-4">
-                <button onclick="toggleMute()" id="main-mute-btn"
-                    class="flex items-center gap-2 px-4 py-2 rounded-lg ${isMuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel hover:bg-vc-hover text-vc-text'} transition">
-                    <svg class="w-5 h-5" id="main-icon-mic" fill="currentColor" viewBox="0 0 24 24">
-                        ${isMuted ?
-                            '<path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/>' :
-                            '<path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>'}
-                    </svg>
-                    <span id="main-mute-text">${isMuted ? 'Unmute' : 'Mute'}</span>
-                </button>
-                <button onclick="isScreenSharing ? stopScreenShare() : startScreenShare()" id="screen-share-btn"
-                    class="flex items-center gap-2 px-4 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-                    </svg>
-                    <span>Share Screen</span>
-                </button>
-                <div class="flex items-center gap-2">
-                    <span class="text-xs text-vc-muted">Sensitivity</span>
-                    <div class="flex items-center gap-2 w-36">
-                        <input type="range" min="1" max="60" value="${vadThreshold}" oninput="setVadThreshold(this.value)"
-                            class="w-full h-1.5 rounded-full appearance-none bg-vc-border cursor-pointer accent-vc-accent">
+            <div class="px-3 md:px-6 py-2 md:py-3 border-t border-vc-border bg-vc-sidebar/50">
+                <!-- Row 1: Main buttons -->
+                <div class="flex items-center justify-center gap-2 md:gap-4">
+                    <button onclick="toggleMute()" id="main-mute-btn"
+                        class="flex items-center gap-1.5 px-3 py-2 rounded-lg ${isMuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel hover:bg-vc-hover text-vc-text'} transition text-sm">
+                        <svg class="w-5 h-5" id="main-icon-mic" fill="currentColor" viewBox="0 0 24 24">
+                            ${isMuted ?
+                                '<path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.08c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/>' :
+                                '<path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>'}
+                        </svg>
+                        <span id="main-mute-text" class="hidden md:inline">${isMuted ? 'Unmute' : 'Mute'}</span>
+                    </button>
+                    <button onclick="isScreenSharing ? stopScreenShare() : startScreenShare()" id="screen-share-btn"
+                        class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition text-sm">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+                        </svg>
+                        <span class="hidden md:inline">Share Screen</span>
+                    </button>
+                    <button onclick="togglePTT()" id="ptt-btn"
+                        class="flex items-center gap-1.5 px-3 py-2 rounded-lg ${pushToTalk ? 'bg-vc-accent/20 text-vc-accent' : 'bg-vc-channel hover:bg-vc-hover text-vc-muted'} transition text-sm">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+                        </svg>
+                        <span class="hidden md:inline">PTT ${pushToTalk ? 'ON' : 'OFF'}</span>
+                    </button>
+                    <div class="text-xs text-vc-muted hidden md:block" id="ptt-hint">${pushToTalk ? 'Hold Space to talk' : ''}</div>
+                </div>
+                <!-- Row 2: Sensitivity -->
+                <div class="flex items-center gap-2 mt-2 justify-center">
+                    <span class="text-xs text-vc-muted flex-shrink-0">Sensitivity</span>
+                    <input type="range" min="1" max="60" value="${vadThreshold}" oninput="setVadThreshold(this.value)"
+                        class="w-20 md:w-36 h-1.5 rounded-full appearance-none bg-vc-border cursor-pointer accent-vc-accent">
+                    <div class="relative w-16 h-2 bg-vc-bg rounded-full overflow-hidden border border-vc-border flex-shrink-0">
+                        <div id="vad-meter" class="h-full rounded-full bg-vc-muted/50 transition-all duration-75" style="width:0%"></div>
+                        <div id="vad-threshold-marker" class="absolute top-0 h-full w-0.5 bg-vc-accent/80" style="left:${Math.min(100, (vadThreshold / 80) * 100)}%"></div>
                     </div>
+                </div>
+            </div>
                     <div class="relative w-16 h-2 bg-vc-bg rounded-full overflow-hidden border border-vc-border">
                         <div id="vad-meter" class="h-full rounded-full bg-vc-muted/50 transition-all duration-75" style="width:0%"></div>
                         <div id="vad-threshold-marker" class="absolute top-0 h-full w-0.5 bg-vc-accent/80" style="left:${Math.min(100, (vadThreshold / 80) * 100)}%"></div>
