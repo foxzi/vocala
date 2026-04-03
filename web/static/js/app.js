@@ -977,8 +977,17 @@ function handleRemoteCameraTrack(stream, track, mid) {
     const grid = document.getElementById('camera-grid');
     if (!grid) return;
 
-    // Use transceiver mid as stable ID (survives renegotiation for same m-line)
     const camId = 'remote-cam-' + (mid || track.id);
+
+    // Deduplicate: remove any existing element showing the same stream
+    // (renegotiation can create new transceivers/mids for same source)
+    grid.querySelectorAll('[id^="remote-cam-"]').forEach(el => {
+        const v = el.querySelector('video');
+        if (v && v.srcObject === stream && el.id !== camId) {
+            el.remove();
+        }
+    });
+
     const existing = document.getElementById(camId);
     if (existing) {
         const video = existing.querySelector('video');
@@ -987,6 +996,27 @@ function handleRemoteCameraTrack(stream, track, mid) {
             video.play().catch(() => {});
         }
         return;
+    }
+
+    // Limit: max one remote camera per stream id
+    // All cameras from SFU have streamId="camera", but each is a separate stream object
+    // Count existing remote cameras — if more than expected, clean stale ones
+    const receivers = peerConnection ? peerConnection.getReceivers().filter(
+        r => r.track && r.track.kind === 'video' && r.track.readyState === 'live'
+    ) : [];
+    const liveRemoteCamCount = receivers.length;
+    const domCamCount = grid.querySelectorAll('[id^="remote-cam-"]').length;
+    if (domCamCount >= liveRemoteCamCount) {
+        // More DOM elements than live tracks — clean stale ones
+        grid.querySelectorAll('[id^="remote-cam-"]').forEach(el => {
+            const v = el.querySelector('video');
+            if (v && v.srcObject) {
+                const tracks = v.srcObject.getVideoTracks();
+                if (tracks.length === 0 || tracks.every(t => t.readyState === 'ended')) {
+                    el.remove();
+                }
+            }
+        });
     }
 
     const wrapper = document.createElement('div');
@@ -1007,7 +1037,6 @@ function handleRemoteCameraTrack(stream, track, mid) {
 
     track.onended = () => removeFromCameraGrid(camId);
 
-    // Remove if track goes silent for too long (connection lost)
     let muteTimer = null;
     track.onmute = () => {
         muteTimer = setTimeout(() => removeFromCameraGrid(camId), 5000);
