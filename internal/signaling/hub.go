@@ -3,9 +3,11 @@ package signaling
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/kidandcat/vocipher/internal/auth"
@@ -368,6 +370,61 @@ func handleMessage(c *Client, msg Message) {
 	case "ws_media_mode":
 		c.IsWSMedia = true
 		log.Printf("signaling: user %d (%s) switched to WS media transport", c.UserID, c.Username)
+
+	case "chat_message":
+		var p struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.Text == "" {
+			return
+		}
+		// Limit message length
+		text := p.Text
+		if len(text) > 2000 {
+			text = text[:2000]
+		}
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		// Generate message ID for reactions
+		msgID := fmt.Sprintf("%d-%d", c.UserID, time.Now().UnixMilli())
+		chatMsg, _ := json.Marshal(map[string]any{
+			"type":       "chat_message",
+			"id":         msgID,
+			"user_id":    c.UserID,
+			"username":   c.Username,
+			"text":       text,
+			"channel_id": chID,
+			"timestamp":  time.Now().Unix(),
+		})
+		GlobalHub.BroadcastToChannel(chID, chatMsg)
+
+	case "chat_reaction":
+		var p struct {
+			MessageID string `json:"message_id"`
+			Emoji     string `json:"emoji"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.MessageID == "" || p.Emoji == "" {
+			return
+		}
+		// Limit emoji length
+		if len(p.Emoji) > 16 {
+			return
+		}
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		reactionMsg, _ := json.Marshal(map[string]any{
+			"type":       "chat_reaction",
+			"message_id": p.MessageID,
+			"user_id":    c.UserID,
+			"username":   c.Username,
+			"emoji":      p.Emoji,
+			"channel_id": chID,
+		})
+		GlobalHub.BroadcastToChannel(chID, reactionMsg)
 
 	case "screen_preview":
 		var p struct {

@@ -107,6 +107,12 @@ function handleWSMessage(msg) {
         case 'ice_candidate':
             handleRemoteICECandidate(msg.payload);
             break;
+        case 'chat_message':
+            appendChatMessage(msg);
+            break;
+        case 'chat_reaction':
+            addChatReaction(msg);
+            break;
         case 'screen_preview':
             // Only accept data: URIs to prevent injection via url()
             if (msg.payload.image && msg.payload.image.startsWith('data:image/')) {
@@ -279,11 +285,35 @@ function joinChannel(channelID, channelName) {
                     Leave
                 </button>
             </div>
-            <div class="flex-1 flex flex-col overflow-y-auto p-3 md:p-8">
-                <div id="screen-share-anchor"></div>
-                <div class="flex-1 flex items-center justify-center" id="channel-view-users">
-                    <div class="text-center text-vc-muted">
-                        <p>Joining channel...</p>
+            <div class="flex-1 flex flex-col md:flex-row overflow-hidden">
+                <!-- Voice/Video area -->
+                <div class="flex-1 flex flex-col overflow-y-auto p-3 md:p-6 min-h-0">
+                    <div id="screen-share-anchor"></div>
+                    <div class="flex-1 flex items-center justify-center" id="channel-view-users">
+                        <div class="text-center text-vc-muted">
+                            <p>Joining channel...</p>
+                        </div>
+                    </div>
+                </div>
+                <!-- Chat panel -->
+                <div class="w-full md:w-80 border-t md:border-t-0 md:border-l border-vc-border flex flex-col bg-vc-sidebar/30 max-h-64 md:max-h-none">
+                    <div class="px-3 py-2 border-b border-vc-border flex items-center gap-2">
+                        <svg class="w-4 h-4 text-vc-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                        </svg>
+                        <span class="text-xs font-medium text-vc-muted">Chat</span>
+                    </div>
+                    <div id="chat-messages" class="flex-1 overflow-y-auto p-2 space-y-1 min-h-0"></div>
+                    <div class="p-2 border-t border-vc-border">
+                        <form onsubmit="sendChatMessage(event)" class="flex gap-1.5">
+                            <input type="text" id="chat-input" placeholder="Message..." autocomplete="off"
+                                class="flex-1 px-2.5 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition">
+                            <button type="submit" class="px-2.5 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white rounded-lg transition">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                                </svg>
+                            </button>
+                        </form>
                     </div>
                 </div>
             </div>
@@ -1366,6 +1396,104 @@ function showGlobalMicWarning() {
 function hideGlobalMicWarning() {
     const banner = document.getElementById('global-mic-warning');
     if (banner) banner.remove();
+}
+
+// ─── Chat ─────────────────────────────────────────────────────
+
+const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '👏', '🔥'];
+
+function sendChatMessage(event) {
+    event.preventDefault();
+    const input = document.getElementById('chat-input');
+    const text = input.value.trim();
+    if (!text || !currentChannelID) return;
+
+    sendWS({
+        type: 'chat_message',
+        payload: { text },
+    });
+    input.value = '';
+}
+
+function appendChatMessage(msg) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+
+    const el = document.createElement('div');
+    el.id = 'msg-' + msg.id;
+    el.className = 'group relative px-2 py-1 rounded hover:bg-vc-hover/30 transition';
+
+    const time = new Date(msg.timestamp * 1000);
+    const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    el.innerHTML = `
+        <div class="flex items-baseline gap-1.5">
+            <span class="text-xs font-semibold text-vc-accent">${escapeHTML(msg.username)}</span>
+            <span class="text-[10px] text-vc-muted">${timeStr}</span>
+        </div>
+        <div class="text-sm text-vc-text break-words">${escapeHTML(msg.text)}</div>
+        <div class="reactions flex flex-wrap gap-1 mt-0.5" id="reactions-${msg.id}"></div>
+        <button onclick="showReactionPicker('${msg.id}')"
+            class="absolute right-1 top-0.5 opacity-0 group-hover:opacity-100 text-xs bg-vc-channel hover:bg-vc-hover rounded px-1 py-0.5 transition text-vc-muted">
+            +
+        </button>
+    `;
+
+    container.appendChild(el);
+    container.scrollTop = container.scrollHeight;
+}
+
+function showReactionPicker(messageId) {
+    // Remove existing picker
+    const old = document.getElementById('reaction-picker');
+    if (old) old.remove();
+
+    const picker = document.createElement('div');
+    picker.id = 'reaction-picker';
+    picker.className = 'absolute z-50 bg-vc-sidebar border border-vc-border rounded-lg shadow-lg p-1 flex gap-0.5';
+
+    REACTION_EMOJIS.forEach(emoji => {
+        const btn = document.createElement('button');
+        btn.className = 'hover:bg-vc-hover rounded p-1 text-sm transition';
+        btn.textContent = emoji;
+        btn.onclick = () => {
+            sendWS({
+                type: 'chat_reaction',
+                payload: { message_id: messageId, emoji },
+            });
+            picker.remove();
+        };
+        picker.appendChild(btn);
+    });
+
+    const msgEl = document.getElementById('msg-' + messageId);
+    if (msgEl) {
+        msgEl.appendChild(picker);
+        // Auto-remove after 5s
+        setTimeout(() => picker.remove(), 5000);
+    }
+}
+
+function addChatReaction(msg) {
+    const container = document.getElementById('reactions-' + msg.message_id);
+    if (!container) return;
+
+    // Check if this emoji already exists, increment counter
+    const existing = container.querySelector(`[data-emoji="${msg.emoji}"]`);
+    if (existing) {
+        const count = parseInt(existing.dataset.count || '1') + 1;
+        existing.dataset.count = count;
+        existing.textContent = msg.emoji + (count > 1 ? ' ' + count : '');
+        return;
+    }
+
+    const badge = document.createElement('span');
+    badge.className = 'inline-flex items-center px-1 py-0.5 rounded bg-vc-channel text-xs cursor-default';
+    badge.dataset.emoji = msg.emoji;
+    badge.dataset.count = '1';
+    badge.textContent = msg.emoji;
+    badge.title = msg.username;
+    container.appendChild(badge);
 }
 
 // ─── WS Media Transport (mobile fallback) ─────────────────────
