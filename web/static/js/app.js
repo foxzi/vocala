@@ -1005,10 +1005,16 @@ function handleRemoteCameraTrack(stream, track, mid) {
     grid.appendChild(wrapper);
     updateGridColumns();
 
-    track.onended = () => {
-        removeFromCameraGrid(camId);
+    track.onended = () => removeFromCameraGrid(camId);
+
+    // Remove if track goes silent for too long (connection lost)
+    let muteTimer = null;
+    track.onmute = () => {
+        muteTimer = setTimeout(() => removeFromCameraGrid(camId), 5000);
     };
-    track.onmute = () => {};  // ignore mute during renegotiation
+    track.onunmute = () => {
+        if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
+    };
 }
 
 function removeFromCameraGrid(id) {
