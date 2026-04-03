@@ -510,7 +510,17 @@ async function startWebRTC() {
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
         ];
-        peerConnection = new RTCPeerConnection({ iceServers });
+        // Force relay on mobile to avoid carrier NAT issues
+        const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        const hasTurn = iceServers.some(s => {
+            const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+            return urls.some(u => u.startsWith('turn') || u.startsWith('turns'));
+        });
+        const rtcConfig = { iceServers };
+        if (isMobile && hasTurn) {
+            rtcConfig.iceTransportPolicy = 'relay';
+        }
+        peerConnection = new RTCPeerConnection(rtcConfig);
 
         // Add processed audio track (goes through GainNode)
         processedStream.getTracks().forEach(track => {
