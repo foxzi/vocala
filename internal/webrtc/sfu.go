@@ -31,6 +31,7 @@ type Peer struct {
 	cameraOutputTracks map[int64]*webrtc.TrackLocalStaticRTP // camera
 	mu                 sync.Mutex
 	negoMu             sync.Mutex
+	negoScheduled      bool // debounce flag for renegotiation
 }
 
 // SFU manages all peer connections for a channel.
@@ -601,7 +602,29 @@ func (s *SFU) renegotiateAllExcept(userID int64) {
 	s.mu.RUnlock()
 }
 
+// renegotiate schedules a debounced renegotiation for a peer.
+// Multiple calls within 300ms are coalesced into one offer.
 func (s *SFU) renegotiate(peer *Peer) {
+	peer.mu.Lock()
+	if peer.negoScheduled {
+		peer.mu.Unlock()
+		return
+	}
+	peer.negoScheduled = true
+	peer.mu.Unlock()
+
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+
+		peer.mu.Lock()
+		peer.negoScheduled = false
+		peer.mu.Unlock()
+
+		s.doRenegotiate(peer)
+	}()
+}
+
+func (s *SFU) doRenegotiate(peer *Peer) {
 	peer.negoMu.Lock()
 	defer peer.negoMu.Unlock()
 
