@@ -138,18 +138,14 @@ func GetTURNCredentials() *TURNCredentials {
 }
 
 func newPeerConnectionConfig() webrtc.Configuration {
-	iceServers := []webrtc.ICEServer{
-		{URLs: []string{"stun:stun.l.google.com:19302"}},
-		{URLs: []string{"stun:stun1.l.google.com:19302"}},
+	// SFU does not need TURN — it has a public IP via NAT 1:1.
+	// TURN credentials are only passed to clients via the HTML template.
+	return webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+			{URLs: []string{"stun:stun1.l.google.com:19302"}},
+		},
 	}
-	if turnCreds != nil {
-		iceServers = append(iceServers, webrtc.ICEServer{
-			URLs:       turnCreds.URIs,
-			Username:   turnCreds.Username,
-			Credential: turnCreds.Password,
-		})
-	}
-	return webrtc.Configuration{ICEServers: iceServers}
 }
 
 func GetOrCreateSFU(channelID int64, sendMsg func(userID int64, msg []byte)) *SFU {
