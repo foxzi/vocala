@@ -12,3 +12,4 @@ vocipher
 nginx/certs/
 .env
 config.yaml
+dist/

@@ -1,0 +1,45 @@
+name: vocipher
+arch: amd64
+platform: linux
+version: v0.1.0
+maintainer: Vocipher <noreply@vocipher.com>
+description: Self-hosted voice chat server with WebRTC SFU
+vendor: Vocipher
+homepage: https://github.com/foxzi/vocipher
+license: MIT
+
+contents:
+  # Binary
+  - src: ./vocipher
+    dst: /usr/bin/vocipher
+    file_info:
+      mode: 0755
+
+  # Web assets
+  - src: ./web/templates/
+    dst: /usr/share/vocipher/web/templates/
+  - src: ./web/static/
+    dst: /usr/share/vocipher/web/static/
+
+  # Config
+  - src: ./packaging/config.yaml.default
+    dst: /etc/vocipher/config.yaml.default
+    type: config
+  - src: ./config.yaml.example
+    dst: /etc/vocipher/config.yaml.example
+
+  # Systemd
+  - src: ./packaging/vocipher.service
+    dst: /usr/lib/systemd/system/vocipher.service
+
+scripts:
+  postinstall: ./packaging/postinstall.sh
+  preremove: ./packaging/preremove.sh
+
+overrides:
+  deb:
+    depends:
+      - libc6
+  rpm:
+    depends:
+      - glibc

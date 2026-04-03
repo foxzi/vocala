@@ -1,4 +1,4 @@
-.PHONY: run build clean
+.PHONY: run build clean package deb rpm
 
 run:
 	CGO_ENABLED=1 go run ./cmd/server/
@@ -8,3 +8,14 @@ build:
 
 clean:
 	rm -f vocipher vocipher.db vocipher.db-wal vocipher.db-shm
+	rm -rf dist/
+
+deb: build
+	mkdir -p dist
+	nfpm package --packager deb --target dist/
+
+rpm: build
+	mkdir -p dist
+	nfpm package --packager rpm --target dist/
+
+package: deb rpm

@@ -1,0 +1,25 @@
+# Vocipher configuration
+# See config.yaml.example for all available options.
+
+server:
+  addr: ":8090"
+
+database:
+  path: "/var/lib/vocipher/vocipher.db"
+
+webrtc:
+  nat_ip: ""
+  udp_port_min: 40000
+  udp_port_max: 40200
+
+turn:
+  enabled: false
+  ip: ""
+  port: 3478
+
+auth:
+  session_days: 30
+  min_password: 8
+  cookie_secure: false
+  rate_limit_rps: 10
+  rate_limit_burst: 20
