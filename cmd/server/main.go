@@ -109,7 +109,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		w.Header().Set("Permissions-Policy", "microphone=(self), camera=()")
+		w.Header().Set("Permissions-Policy", "microphone=(self), camera=(self)")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -222,6 +222,20 @@ func main() {
 			time.Sleep(1 * time.Hour)
 		}
 	}()
+
+	// Periodic chat message cleanup
+	if cfg.Database.ChatRetentionDays > 0 {
+		go func() {
+			for {
+				if n, err := database.CleanupOldMessages(cfg.Database.ChatRetentionDays); err != nil {
+					log.Printf("chat cleanup error: %v", err)
+				} else if n > 0 {
+					log.Printf("chat cleanup: removed %d old messages", n)
+				}
+				time.Sleep(6 * time.Hour)
+			}
+		}()
+	}
 
 	templates = loadTemplates()
 
