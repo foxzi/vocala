@@ -568,7 +568,7 @@ func (s *SFU) addOutputTrack(destPeer *Peer, srcUserID int64, srcTrack *webrtc.T
 	}
 	destPeer.mu.Unlock()
 
-	streamID := kind
+	streamID := fmt.Sprintf("%s-%d", kind, srcUserID)
 	trackID := fmt.Sprintf("%s-%d-%s", kind, srcUserID, randomID())
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		srcTrack.Codec().RTPCodecCapability,

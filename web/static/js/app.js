@@ -110,6 +110,9 @@ function handleWSMessage(msg) {
         case 'chat_message':
             appendChatMessage(msg);
             break;
+        case 'chat_history':
+            loadChatHistory(msg.messages || []);
+            break;
         case 'chat_reaction':
             addChatReaction(msg);
             break;
@@ -581,7 +584,7 @@ async function startWebRTC() {
                 const stream = event.streams[0] || new MediaStream([event.track]);
                 const streamId = stream.id || '';
 
-                if (streamId === 'camera') {
+                if (streamId.startsWith('camera')) {
                     // Remote camera — add to camera grid
                     // Use mid (media line ID) as stable identifier
                     const mid = event.transceiver ? event.transceiver.mid : null;
@@ -853,6 +856,8 @@ function showRemoteVideo(stream, track) {
         `;
     }
     playOverlay.onclick = () => {
+        // Check element is still in DOM (renegotiation may have replaced it)
+        if (!document.contains(video)) return;
         video.classList.remove('hidden');
         playOverlay.remove();
         videoContainer.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative';
@@ -861,7 +866,9 @@ function showRemoteVideo(stream, track) {
             video.srcObject = stream;
         }
         video.play().catch(err => {
-            console.error('Screen share video play failed:', err);
+            if (err.name !== 'AbortError') {
+                console.error('Screen share video play failed:', err);
+            }
         });
     };
 
@@ -1018,8 +1025,9 @@ function handleRemoteCameraTrack(stream, track, mid) {
     const grid = document.getElementById('camera-grid');
     if (!grid) return;
 
-    console.log('Camera track:', { mid, trackId: track.id, streamId: stream.id });
-    const camId = 'remote-cam-' + (mid || track.id);
+    // stream.id = "camera-{userID}" from SFU — stable across renegotiation
+    const camId = 'remote-cam-' + stream.id;
+    console.log('Camera track:', { mid, trackId: track.id, streamId: stream.id, camId });
     const existing = document.getElementById(camId);
     if (existing) {
         const video = existing.querySelector('video');
@@ -1413,6 +1421,13 @@ function sendChatMessage(event) {
         payload: { text },
     });
     input.value = '';
+}
+
+function loadChatHistory(messages) {
+    const container = document.getElementById('chat-messages');
+    if (!container) return;
+    container.innerHTML = '';
+    messages.forEach(msg => appendChatMessage(msg));
 }
 
 function appendChatMessage(msg) {
