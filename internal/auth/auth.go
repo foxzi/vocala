@@ -136,6 +136,21 @@ func UserFromToken(token string) *User {
 // --- Admin functions ---
 
 // ListUsers returns all users ordered by creation date.
+func GetUserByUsername(username string) (*User, error) {
+	var u User
+	var isAdmin, isActive int
+	err := database.DB.QueryRow(
+		"SELECT id, username, is_admin, is_active, created_at FROM users WHERE username = ?",
+		username,
+	).Scan(&u.ID, &u.Username, &isAdmin, &isActive, &u.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	u.IsAdmin = isAdmin == 1
+	u.IsActive = isActive == 1
+	return &u, nil
+}
+
 func ListUsers() ([]User, error) {
 	rows, err := database.DB.Query(
 		"SELECT id, username, is_admin, is_active, created_at FROM users ORDER BY created_at DESC",

@@ -44,6 +44,7 @@ type Message struct {
 type Client struct {
 	UserID    int64
 	Username  string
+	IsAdmin   bool
 	Conn      *websocket.Conn
 	Send      chan []byte // text JSON messages
 	SendMedia chan []byte // binary media frames
@@ -142,6 +143,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	client := &Client{
 		UserID:    user.ID,
 		Username:  user.Username,
+		IsAdmin:   user.IsAdmin,
 		Conn:      conn,
 		Send:      make(chan []byte, 256),
 		SendMedia: make(chan []byte, 64),
@@ -255,6 +257,17 @@ func handleMessage(c *Client, msg Message) {
 			ChannelID int64 `json:"channel_id"`
 		}
 		json.Unmarshal(msg.Payload, &p)
+
+		// Check access for private channels
+		if !channel.CanJoin(p.ChannelID, c.UserID, c.IsAdmin) {
+			errMsg, _ := json.Marshal(map[string]any{
+				"type":  "error",
+				"error": "access_denied",
+				"text":  "You don't have access to this private channel",
+			})
+			GlobalHub.SendTo(c.UserID, errMsg)
+			return
+		}
 
 		oldCh := channel.GetUserChannel(c.UserID)
 		if oldCh > 0 {

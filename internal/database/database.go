@@ -65,6 +65,20 @@ func migrate() {
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS channel_members (
+			channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			PRIMARY KEY (channel_id, user_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS channel_invites (
+			token TEXT PRIMARY KEY,
+			channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+			created_by INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			max_uses INTEGER NOT NULL DEFAULT 0,
+			uses INTEGER NOT NULL DEFAULT 0
+		)`,
 	}
 
 	for _, q := range queries {
@@ -77,6 +91,7 @@ func migrate() {
 	migrations := []string{
 		`ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE users ADD COLUMN is_active INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN is_private INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, q := range migrations {
 		DB.Exec(q) // ignore errors if columns already exist

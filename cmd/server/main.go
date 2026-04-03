@@ -253,6 +253,12 @@ func main() {
 	mux.HandleFunc("/", requireAuth(handleApp))
 	mux.HandleFunc("/channels", requireAuth(csrfProtect(handleChannels)))
 	mux.HandleFunc("/channels/delete", requireAuth(csrfProtect(handleDeleteChannel)))
+	mux.HandleFunc("/channels/members", requireAuth(csrfProtect(handleChannelMembers)))
+	mux.HandleFunc("/channels/members/add", requireAuth(csrfProtect(handleChannelMemberAdd)))
+	mux.HandleFunc("/channels/members/remove", requireAuth(csrfProtect(handleChannelMemberRemove)))
+	mux.HandleFunc("/channels/invite", requireAuth(csrfProtect(handleChannelInvite)))
+	mux.HandleFunc("/invite/", handleInviteAccept)
+	mux.HandleFunc("/api/users", requireAuth(handleAPIUsers))
 
 	// Admin routes
 	mux.HandleFunc("/admin", requireAdmin(handleAdmin))
@@ -344,7 +350,10 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		csrfToken := setCSRFCookie(w, r)
-		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{"CSRFToken": csrfToken})
+		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{
+			"CSRFToken": csrfToken,
+			"Next":      r.URL.Query().Get("next"),
+		})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -393,7 +402,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.SetCookie(w, sessionCookie(token, 86400*30))
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	next := r.FormValue("next")
+	if next == "" || !strings.HasPrefix(next, "/") {
+		next = "/"
+	}
+	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
 func handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -536,8 +549,9 @@ func handleChannels(w http.ResponseWriter, r *http.Request) {
 	user := userFromContext(r)
 
 	name := r.FormValue("name")
+	isPrivate := r.FormValue("is_private") == "on"
 	if name != "" {
-		if _, err := channel.Create(name, user.ID); err != nil {
+		if _, err := channel.Create(name, user.ID, isPrivate); err != nil {
 			log.Printf("failed to create channel: %v", err)
 		}
 	}
@@ -710,4 +724,205 @@ func handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/admin?flash=Password+reset+successfully", http.StatusSeeOther)
+}
+
+// --- Channel member management ---
+
+func handleChannelMembers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	chID, err := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	user := userFromContext(r)
+	if !channel.CanManage(chID, user.ID, user.IsAdmin) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	members, err := channel.GetMembersWithNames(chID)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	ch, err := channel.GetByID(chID)
+	if err != nil {
+		http.Error(w, "channel not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"channel_id": ch.ID,
+		"name":       ch.Name,
+		"members":    members,
+		"created_by": ch.CreatedBy,
+	})
+}
+
+func handleChannelMemberAdd(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	chID, err := strconv.ParseInt(r.FormValue("channel_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid channel_id", http.StatusBadRequest)
+		return
+	}
+
+	user := userFromContext(r)
+	if !channel.CanManage(chID, user.ID, user.IsAdmin) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	username := r.FormValue("username")
+	target, err := auth.GetUserByUsername(username)
+	if err != nil {
+		http.Error(w, "user not found", http.StatusNotFound)
+		return
+	}
+
+	if err := channel.AddMember(chID, target.ID); err != nil {
+		http.Error(w, "failed to add member", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+func handleChannelMemberRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	chID, err := strconv.ParseInt(r.FormValue("channel_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid channel_id", http.StatusBadRequest)
+		return
+	}
+
+	user := userFromContext(r)
+	if !channel.CanManage(chID, user.ID, user.IsAdmin) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	memberID, err := strconv.ParseInt(r.FormValue("user_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid user_id", http.StatusBadRequest)
+		return
+	}
+
+	if err := channel.RemoveMember(chID, memberID); err != nil {
+		http.Error(w, "failed to remove member", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// --- API ---
+
+func handleAPIUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	users, err := auth.ListUsers()
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	type userInfo struct {
+		ID       int64  `json:"id"`
+		Username string `json:"username"`
+	}
+	var result []userInfo
+	for _, u := range users {
+		if u.IsActive {
+			result = append(result, userInfo{ID: u.ID, Username: u.Username})
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// --- Invite links ---
+
+func handleChannelInvite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	chID, err := strconv.ParseInt(r.FormValue("channel_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid channel_id", http.StatusBadRequest)
+		return
+	}
+
+	user := userFromContext(r)
+	if !channel.CanManage(chID, user.ID, user.IsAdmin) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	token, err := channel.CreateInvite(chID, user.ID)
+	if err != nil {
+		log.Printf("failed to create invite: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token": token,
+		"url":   fmt.Sprintf("/invite/%s", token),
+	})
+}
+
+func handleInviteAccept(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	token := strings.TrimPrefix(r.URL.Path, "/invite/")
+	if token == "" {
+		http.Error(w, "invalid invite", http.StatusBadRequest)
+		return
+	}
+
+	user := auth.UserFromRequest(r)
+	if user == nil {
+		http.Redirect(w, r, "/login?next="+r.URL.Path, http.StatusSeeOther)
+		return
+	}
+
+	chID, err := channel.AcceptInvite(token, user.ID)
+	if err != nil {
+		http.Error(w, "Invalid or expired invite link", http.StatusBadRequest)
+		return
+	}
+
+	ch, err := channel.GetByID(chID)
+	if err != nil {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+
+	http.Redirect(w, r, "/channels/"+ch.Name, http.StatusSeeOther)
 }
