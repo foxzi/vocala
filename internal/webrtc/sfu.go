@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -487,11 +488,13 @@ func (s *SFU) forwardRTP(track *webrtc.TrackRemote, userID int64, kind string, b
 }
 
 func (s *SFU) addOutputTrack(destPeer *Peer, srcUserID int64, srcTrack *webrtc.TrackRemote, kind string) error {
-	// Use kind as StreamID so the client can distinguish camera from screen
+	// StreamID = kind so client can distinguish camera from screen
+	// TrackID = kind-srcUserID to make it unique per source user
 	streamID := kind
+	trackID := fmt.Sprintf("%s-%d", kind, srcUserID)
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(
 		srcTrack.Codec().RTPCodecCapability,
-		srcTrack.ID(),
+		trackID,
 		streamID,
 	)
 	if err != nil {
