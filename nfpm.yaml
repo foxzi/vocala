@@ -18,8 +18,8 @@ contents:
   # Web assets
   - src: ./web/templates/
     dst: /usr/share/vocipher/web/templates/
-  - src: ./web/static/
-    dst: /usr/share/vocipher/web/static/
+  - src: ./web/static/js/
+    dst: /usr/share/vocipher/web/static/js/
 
   # Config
   - src: ./packaging/config.yaml.default
