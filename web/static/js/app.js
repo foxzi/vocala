@@ -943,7 +943,7 @@ function handleRemoteCameraTrack(stream, track) {
     const grid = document.getElementById('camera-grid');
     if (!grid) return;
 
-    const camId = 'remote-cam-' + stream.id;
+    const camId = 'remote-cam-' + track.id;
     const existing = document.getElementById(camId);
     if (existing) {
         const video = existing.querySelector('video');

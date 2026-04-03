@@ -5,7 +5,7 @@ services:
       - "8090"
     ports:
       - "3478:3478/udp"        # TURN server
-      - "50000-50100:50000-50100/udp"  # WebRTC UDP media ports
+      - "40000-40200:40000-40200/udp"  # WebRTC UDP media ports
     environment:
       - VOCIPHER_DB_PATH=/app/data/vocipher.db
       - VOCIPHER_ADDR=:8090

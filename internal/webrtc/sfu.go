@@ -81,7 +81,7 @@ func getAPI() *webrtc.API {
 		if natIP != "" {
 			s := webrtc.SettingEngine{}
 			s.SetNAT1To1IPs([]string{natIP}, webrtc.ICECandidateTypeHost)
-			s.SetEphemeralUDPPortRange(50000, 50100)
+			s.SetEphemeralUDPPortRange(40000, 40200)
 			opts = append(opts, webrtc.WithSettingEngine(s))
 		}
 
