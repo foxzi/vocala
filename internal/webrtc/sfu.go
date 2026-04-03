@@ -91,16 +91,17 @@ func getAPI() *webrtc.API {
 			webrtc.WithInterceptorRegistry(i),
 		}
 
-		if natIP != "" || udpPortMin > 0 {
-			s := webrtc.SettingEngine{}
-			if natIP != "" {
-				s.SetNAT1To1IPs([]string{natIP}, webrtc.ICECandidateTypeHost)
-			}
-			if udpPortMin > 0 && udpPortMax > 0 {
-				s.SetEphemeralUDPPortRange(udpPortMin, udpPortMax)
-			}
-			opts = append(opts, webrtc.WithSettingEngine(s))
+		// Always configure SettingEngine for keepalive and optional NAT/ports
+		s := webrtc.SettingEngine{}
+		// Aggressive ICE keepalive for mobile networks with short NAT binding
+		s.SetICETimeouts(5*time.Second, 25*time.Second, 2*time.Second)
+		if natIP != "" {
+			s.SetNAT1To1IPs([]string{natIP}, webrtc.ICECandidateTypeHost)
 		}
+		if udpPortMin > 0 && udpPortMax > 0 {
+			s.SetEphemeralUDPPortRange(udpPortMin, udpPortMax)
+		}
+		opts = append(opts, webrtc.WithSettingEngine(s))
 
 		api = webrtc.NewAPI(opts...)
 	})
