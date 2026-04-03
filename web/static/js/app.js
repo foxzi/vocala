@@ -52,6 +52,11 @@ function connectWS() {
         reconnectAttempts = 0;
         setConnectionStatus('connected');
 
+        // Auto-join from URL on first connect
+        if (!currentChannelID && window.VOCIPHER_AUTO_JOIN) {
+            autoJoinFromURL();
+        }
+
         // Rejoin channel after reconnect
         if (currentChannelID) {
             const chID = currentChannelID;
@@ -252,6 +257,9 @@ function joinChannel(channelID, channelName) {
     currentChannelID = channelID;
     sendWS({ type: 'join_channel', payload: { channel_id: channelID } });
 
+    // Update URL to permanent link
+    history.pushState({ channelID, channelName }, '', '/channels/' + encodeURIComponent(channelName));
+
     // Close sidebar on mobile and update mobile header
     closeSidebarOnMobile();
     const mobileChName = document.getElementById('mobile-channel-name');
@@ -425,6 +433,9 @@ function leaveChannel() {
     sendWS({ type: 'leave_channel' });
     currentChannelID = null;
     cleanupWebRTC();
+
+    // Reset URL
+    history.pushState({}, '', '/');
 
     document.querySelectorAll('.channel-item').forEach(el => {
         el.classList.remove('bg-vc-hover/50');
@@ -1557,3 +1568,35 @@ function stopWSCamera() {
     updateCameraUI();
     removeFromCameraGrid('local-camera');
 }
+
+// ─── Auto-join from URL ───────────────────────────────────────
+
+function autoJoinFromURL() {
+    const channelName = window.VOCIPHER_AUTO_JOIN;
+    if (!channelName) return;
+
+    const tryJoin = () => {
+        const buttons = document.querySelectorAll('[data-ch-name]');
+        for (const btn of buttons) {
+            if (btn.dataset.chName === channelName) {
+                const chId = parseInt(btn.dataset.chId);
+                joinChannel(chId, channelName);
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (!tryJoin()) {
+        setTimeout(tryJoin, 1000);
+    }
+}
+
+// Handle browser back/forward
+window.addEventListener('popstate', (event) => {
+    if (event.state && event.state.channelID) {
+        joinChannel(event.state.channelID, event.state.channelName);
+    } else if (currentChannelID) {
+        leaveChannel();
+    }
+});

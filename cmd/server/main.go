@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -460,13 +461,21 @@ func handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleApp(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	// Allow / and /channels/{name}
+	path := r.URL.Path
+	if path != "/" && !strings.HasPrefix(path, "/channels/") {
 		http.NotFound(w, r)
 		return
 	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	// Extract channel name from URL
+	autoJoinChannel := ""
+	if strings.HasPrefix(path, "/channels/") {
+		autoJoinChannel = strings.TrimPrefix(path, "/channels/")
 	}
 
 	user := userFromContext(r)
@@ -493,11 +502,12 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := map[string]any{
-		"User":       user,
-		"Channels":   channels,
-		"CacheBust":  cacheBust,
-		"CSRFToken":  csrfToken,
-		"ICEServers": iceServers,
+		"User":            user,
+		"Channels":        channels,
+		"CacheBust":       cacheBust,
+		"CSRFToken":       csrfToken,
+		"ICEServers":      iceServers,
+		"AutoJoinChannel": autoJoinChannel,
 	}
 	templates["app.html"].ExecuteTemplate(w, "layout.html", data)
 }

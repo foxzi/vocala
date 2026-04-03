@@ -124,6 +124,7 @@
 
 <script>
     window.VOCIPHER_ICE_SERVERS = {{toJSON .ICEServers}};
+    window.VOCIPHER_AUTO_JOIN = {{toJSON .AutoJoinChannel}};
 </script>
 <script src="/static/js/app.js?v={{.CacheBust}}"></script>
 {{end}}
