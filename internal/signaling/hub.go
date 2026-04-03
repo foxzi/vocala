@@ -1,6 +1,7 @@
 package signaling
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -38,10 +39,12 @@ type Message struct {
 }
 
 type Client struct {
-	UserID   int64
-	Username string
-	Conn     *websocket.Conn
-	Send     chan []byte
+	UserID    int64
+	Username  string
+	Conn      *websocket.Conn
+	Send      chan []byte // text JSON messages
+	SendMedia chan []byte // binary media frames
+	IsWSMedia bool        // true if this client uses WS media transport (mobile)
 }
 
 type Hub struct {
@@ -134,10 +137,11 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	client := &Client{
-		UserID:   user.ID,
-		Username: user.Username,
-		Conn:     conn,
-		Send:     make(chan []byte, 256),
+		UserID:    user.ID,
+		Username:  user.Username,
+		Conn:      conn,
+		Send:      make(chan []byte, 256),
+		SendMedia: make(chan []byte, 64),
 	}
 
 	GlobalHub.Register(client)
@@ -148,9 +152,22 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (c *Client) writePump() {
 	defer c.Conn.Close()
-	for msg := range c.Send {
-		if err := c.Conn.WriteMessage(websocket.TextMessage, msg); err != nil {
-			return
+	for {
+		select {
+		case msg, ok := <-c.Send:
+			if !ok {
+				return
+			}
+			if err := c.Conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				return
+			}
+		case media, ok := <-c.SendMedia:
+			if !ok {
+				return
+			}
+			if err := c.Conn.WriteMessage(websocket.BinaryMessage, media); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -171,9 +188,14 @@ func (c *Client) readPump() {
 	c.Conn.SetReadLimit(maxMessageSize)
 
 	for {
-		_, raw, err := c.Conn.ReadMessage()
+		msgType, raw, err := c.Conn.ReadMessage()
 		if err != nil {
 			return
+		}
+
+		if msgType == websocket.BinaryMessage {
+			handleBinaryMedia(c, raw)
+			continue
 		}
 
 		var msg Message
@@ -183,6 +205,44 @@ func (c *Client) readPump() {
 
 		handleMessage(c, msg)
 	}
+}
+
+// handleBinaryMedia relays binary audio/video frames to other clients in the same channel.
+// Frame format: [1 byte type][payload]
+// Type: 0x01=audio, 0x02=video
+// Server prepends sender userID (8 bytes big-endian) before relaying.
+func handleBinaryMedia(c *Client, raw []byte) {
+	if len(raw) < 2 {
+		return
+	}
+
+	chID := channel.GetUserChannel(c.UserID)
+	if chID == 0 {
+		return
+	}
+
+	// Build relay frame: [1 byte type][8 bytes userID][payload]
+	frame := make([]byte, 9+len(raw)-1)
+	frame[0] = raw[0] // media type
+	binary.BigEndian.PutUint64(frame[1:9], uint64(c.UserID))
+	copy(frame[9:], raw[1:]) // payload
+
+	// Send to all other clients in the channel
+	users := channel.GetUsers(chID)
+	GlobalHub.mu.RLock()
+	for _, u := range users {
+		if u.ID == c.UserID {
+			continue
+		}
+		if client, ok := GlobalHub.clients[u.ID]; ok {
+			select {
+			case client.SendMedia <- frame:
+			default:
+				// drop if slow
+			}
+		}
+	}
+	GlobalHub.mu.RUnlock()
 }
 
 func handleMessage(c *Client, msg Message) {
@@ -304,6 +364,10 @@ func handleMessage(c *Client, msg Message) {
 		if sfu != nil {
 			sfu.SetExpectCamera(c.UserID, false)
 		}
+
+	case "ws_media_mode":
+		c.IsWSMedia = true
+		log.Printf("signaling: user %d (%s) switched to WS media transport", c.UserID, c.Username)
 
 	case "screen_preview":
 		var p struct {

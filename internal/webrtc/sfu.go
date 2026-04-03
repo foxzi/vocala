@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -94,8 +95,16 @@ func getAPI() *webrtc.API {
 		// Always configure SettingEngine for keepalive and optional NAT/ports
 		s := webrtc.SettingEngine{}
 		// ICE keepalive every 2s to maintain NAT bindings on mobile networks
-		// Longer disconnect/failed timeouts to tolerate mobile signal drops
 		s.SetICETimeouts(15*time.Second, 60*time.Second, 2*time.Second)
+		// Enable ICE TCP candidates for mobile clients behind aggressive NAT
+		tcpListener, tcpErr := net.ListenTCP("tcp", &net.TCPAddr{Port: 40201})
+		if tcpErr == nil {
+			tcpMux := webrtc.NewICETCPMux(nil, tcpListener, 8)
+			s.SetICETCPMux(tcpMux)
+			log.Printf("webrtc: ICE TCP mux listening on port 40201")
+		} else {
+			log.Printf("webrtc: failed to start ICE TCP mux: %v", tcpErr)
+		}
 		if natIP != "" {
 			s.SetNAT1To1IPs([]string{natIP}, webrtc.ICECandidateTypeHost)
 		}

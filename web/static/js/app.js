@@ -60,9 +60,7 @@ function connectWS() {
             currentChannelID = chID;
             sendWS({ type: 'join_channel', payload: { channel_id: chID } });
             startWebRTC().then(() => {
-                if (wasCameraOn) {
-                    startCamera();
-                }
+                if (wasCameraOn) startCamera();
             });
         }
     };
@@ -78,7 +76,12 @@ function connectWS() {
         ws.close();
     };
 
+    ws.binaryType = 'arraybuffer';
     ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+            handleWSMediaFrame(event.data);
+            return;
+        }
         const msg = JSON.parse(event.data);
         handleWSMessage(msg);
     };
@@ -327,7 +330,7 @@ function joinChannel(channelID, channelName) {
         </div>
     `;
 
-    // Start WebRTC
+    // Start WebRTC (TCP candidates available for mobile)
     startWebRTC();
 }
 
@@ -1332,4 +1335,203 @@ function showGlobalMicWarning() {
 function hideGlobalMicWarning() {
     const banner = document.getElementById('global-mic-warning');
     if (banner) banner.remove();
+}
+
+// ─── WS Media Transport (mobile fallback) ─────────────────────
+
+const USE_WS_MEDIA = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+let wsMediaRecorder = null;
+let wsMediaAudioElements = {}; // userID -> Audio element
+let wsMediaVideoElements = {}; // userID -> container element
+
+async function startWSMedia() {
+    try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            video: false,
+        });
+
+        // Setup VAD (reads raw stream for level detection)
+        audioContext = new AudioContext();
+        const source = audioContext.createMediaStreamSource(localStream);
+        gainNode = audioContext.createGain();
+        gainNode.gain.value = (pushToTalk || isMuted) ? 0.0 : 1.0;
+        const dest = audioContext.createMediaStreamDestination();
+        source.connect(gainNode);
+        gainNode.connect(dest);
+        processedStream = dest.stream;
+        setupVAD(localStream);
+
+        // Tell server we use WS media
+        sendWS({ type: 'ws_media_mode' });
+
+        // Start recording processed audio and sending via WS
+        startWSAudioSend(processedStream);
+
+        // Handle incoming binary frames
+        ws.binaryType = 'arraybuffer';
+
+        updateRTCStatus();
+        const statusEl = document.getElementById('rtc-status');
+        if (statusEl) {
+            statusEl.innerHTML = '<div class="w-2 h-2 rounded-full bg-vc-green"></div><span class="text-xs text-vc-green">Connected (WS)</span>';
+        }
+    } catch (err) {
+        console.error('WS Media failed:', err);
+        showGlobalMicWarning();
+    }
+}
+
+function startWSAudioSend(stream) {
+    // Use MediaRecorder with small timeslice for low latency
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+
+    wsMediaRecorder = new MediaRecorder(stream, {
+        mimeType: mimeType,
+        audioBitsPerSecond: 32000,
+    });
+
+    wsMediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+            event.data.arrayBuffer().then(buf => {
+                // Frame: [0x01 (audio)] + [payload]
+                const frame = new Uint8Array(1 + buf.byteLength);
+                frame[0] = 0x01;
+                frame.set(new Uint8Array(buf), 1);
+                ws.send(frame.buffer);
+            });
+        }
+    };
+
+    wsMediaRecorder.start(60); // 60ms chunks for low latency
+}
+
+function stopWSMedia() {
+    if (wsMediaRecorder && wsMediaRecorder.state !== 'inactive') {
+        wsMediaRecorder.stop();
+        wsMediaRecorder = null;
+    }
+    // Clean up remote audio elements
+    Object.values(wsMediaAudioElements).forEach(el => {
+        if (el.src) URL.revokeObjectURL(el.src);
+        el.remove();
+    });
+    wsMediaAudioElements = {};
+    Object.values(wsMediaVideoElements).forEach(el => el.remove());
+    wsMediaVideoElements = {};
+}
+
+function handleWSMediaFrame(data) {
+    const view = new DataView(data);
+    if (data.byteLength < 10) return;
+
+    const type = view.getUint8(0);
+    const userIdHi = view.getUint32(1);
+    const userIdLo = view.getUint32(5);
+    const userId = userIdHi * 0x100000000 + userIdLo;
+    const payload = data.slice(9);
+
+    if (type === 0x01) {
+        // Audio frame
+        playWSAudio(userId, payload);
+    } else if (type === 0x02) {
+        // Video frame (future)
+        playWSVideo(userId, payload);
+    }
+}
+
+// Audio playback using MediaSource or Blob URLs
+function playWSAudio(userId, payload) {
+    if (!wsMediaAudioElements[userId]) {
+        const audio = new Audio();
+        audio.autoplay = true;
+        wsMediaAudioElements[userId] = audio;
+    }
+
+    const audio = wsMediaAudioElements[userId];
+    const blob = new Blob([payload], { type: 'audio/webm;codecs=opus' });
+    const url = URL.createObjectURL(blob);
+    
+    // Queue playback
+    if (!audio._queue) audio._queue = [];
+    audio._queue.push(url);
+
+    if (audio.paused || audio.ended) {
+        playNextChunk(audio);
+    }
+}
+
+function playNextChunk(audio) {
+    if (!audio._queue || audio._queue.length === 0) return;
+    
+    const url = audio._queue.shift();
+    if (audio._prevUrl) URL.revokeObjectURL(audio._prevUrl);
+    audio._prevUrl = url;
+    audio.src = url;
+    audio.play().catch(() => {});
+    audio.onended = () => playNextChunk(audio);
+}
+
+function playWSVideo(userId, payload) {
+    // Placeholder for future video support
+}
+
+// WS camera send
+let wsCameraRecorder = null;
+
+async function startWSCamera() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+            audio: false,
+        });
+
+        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+            ? 'video/webm;codecs=vp8'
+            : 'video/webm';
+
+        wsCameraRecorder = new MediaRecorder(cameraStream, {
+            mimeType: mimeType,
+            videoBitsPerSecond: 500000,
+        });
+
+        wsCameraRecorder.ondataavailable = (event) => {
+            if (event.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+                event.data.arrayBuffer().then(buf => {
+                    // Frame: [0x02 (video)] + [payload]
+                    const frame = new Uint8Array(1 + buf.byteLength);
+                    frame[0] = 0x02;
+                    frame.set(new Uint8Array(buf), 1);
+                    ws.send(frame.buffer);
+                });
+            }
+        };
+
+        wsCameraRecorder.start(100); // 100ms chunks
+
+        isCameraOn = true;
+        updateCameraUI();
+        addLocalCameraToGrid();
+
+        cameraStream.getVideoTracks()[0].onended = () => stopWSCamera();
+    } catch (err) {
+        console.error('WS Camera failed:', err);
+    }
+}
+
+function stopWSCamera() {
+    if (wsCameraRecorder && wsCameraRecorder.state !== 'inactive') {
+        wsCameraRecorder.stop();
+        wsCameraRecorder = null;
+    }
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+    }
+    isCameraOn = false;
+    updateCameraUI();
+    removeFromCameraGrid('local-camera');
 }
