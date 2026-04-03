@@ -280,6 +280,26 @@ func handleMessage(c *Client, msg Message) {
 			log.Printf("signaling: webrtc answer failed for user %d: %v", c.UserID, err)
 		}
 
+	case "camera_on":
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		sfu := rtc.GetSFU(chID)
+		if sfu != nil {
+			sfu.SetExpectCamera(c.UserID, true)
+		}
+
+	case "camera_off":
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		sfu := rtc.GetSFU(chID)
+		if sfu != nil {
+			sfu.SetExpectCamera(c.UserID, false)
+		}
+
 	case "screen_preview":
 		var p struct {
 			Image string `json:"image"`

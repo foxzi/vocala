@@ -35,6 +35,12 @@ let screenPreviewInterval = null;
 let latestScreenPreview = null;
 let screenShareUsername = null;
 
+// Camera state
+let cameraStream = null;
+let cameraSender = null;
+let isCameraOn = false;
+let remoteCameras = {}; // userID -> { stream, username }
+
 // ─── WebSocket ────────────────────────────────────────────────
 
 function connectWS() {
@@ -269,12 +275,19 @@ function joinChannel(channelID, channelName) {
                         </svg>
                         <span id="main-mute-text" class="hidden md:inline">${isMuted ? 'Unmute' : 'Mute'}</span>
                     </button>
+                    <button onclick="toggleCamera()" id="camera-btn"
+                        class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition text-sm">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+                        </svg>
+                        <span class="hidden md:inline">Camera</span>
+                    </button>
                     <button onclick="isScreenSharing ? stopScreenShare() : startScreenShare()" id="screen-share-btn"
                         class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition text-sm">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
                         </svg>
-                        <span class="hidden md:inline">Share Screen</span>
+                        <span class="hidden md:inline">Screen</span>
                     </button>
                     <button onclick="togglePTT()" id="ptt-btn"
                         class="flex items-center gap-1.5 px-3 py-2 rounded-lg ${pushToTalk ? 'bg-vc-accent/20 text-vc-accent' : 'bg-vc-channel hover:bg-vc-hover text-vc-muted'} transition text-sm">
@@ -489,7 +502,7 @@ async function startWebRTC() {
             peerConnection.addTrack(track, processedStream);
         });
 
-        // Handle remote tracks (audio from other peers)
+        // Handle remote tracks
         peerConnection.ontrack = (event) => {
             if (event.track.kind === 'audio') {
                 const audio = new Audio();
@@ -498,13 +511,20 @@ async function startWebRTC() {
                 audio.play().catch(() => {});
             } else if (event.track.kind === 'video') {
                 const stream = event.streams[0] || new MediaStream([event.track]);
-                // If video is already playing, just update the stream
-                const existingVideo = document.getElementById('screen-share-video');
-                if (existingVideo) {
-                    existingVideo.srcObject = stream;
-                    existingVideo.play().catch(() => {});
+                const streamId = stream.id || '';
+
+                if (streamId === 'camera') {
+                    // Remote camera — add to camera grid
+                    handleRemoteCameraTrack(stream, event.track);
                 } else {
-                    showRemoteVideo(stream, event.track);
+                    // Screen share
+                    const existingVideo = document.getElementById('screen-share-video');
+                    if (existingVideo) {
+                        existingVideo.srcObject = stream;
+                        existingVideo.play().catch(() => {});
+                    } else {
+                        showRemoteVideo(stream, event.track);
+                    }
                 }
             }
         };
@@ -808,6 +828,166 @@ function updateScreenShareUI() {
     }
 }
 
+// ─── Camera ───────────────────────────────────────────────────
+
+async function toggleCamera() {
+    if (isCameraOn) {
+        stopCamera();
+    } else {
+        await startCamera();
+    }
+}
+
+async function startCamera() {
+    if (!peerConnection) return;
+    try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+            audio: false,
+        });
+
+        const videoTrack = cameraStream.getVideoTracks()[0];
+
+        // Tell SFU that next video track is a camera
+        sendWS({ type: 'camera_on' });
+
+        cameraSender = peerConnection.addTrack(videoTrack, cameraStream);
+
+        // Renegotiate
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        sendWS({ type: 'webrtc_offer', payload: { sdp: offer.sdp } });
+
+        isCameraOn = true;
+        updateCameraUI();
+        showLocalCameraPreview();
+
+        // Handle camera stop (e.g. user revoked permission)
+        videoTrack.onended = () => stopCamera();
+    } catch (err) {
+        console.error('Failed to start camera:', err);
+    }
+}
+
+function stopCamera() {
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+    }
+    sendWS({ type: 'camera_off' });
+    if (cameraSender && peerConnection) {
+        peerConnection.removeTrack(cameraSender);
+        cameraSender = null;
+
+        peerConnection.createOffer().then(offer => {
+            peerConnection.setLocalDescription(offer);
+            sendWS({ type: 'webrtc_offer', payload: { sdp: offer.sdp } });
+        });
+    }
+    isCameraOn = false;
+    updateCameraUI();
+    removeLocalCameraPreview();
+}
+
+function updateCameraUI() {
+    const btn = document.getElementById('camera-btn');
+    if (!btn) return;
+    if (isCameraOn) {
+        btn.className = 'flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-green/20 text-vc-green transition text-sm';
+    } else {
+        btn.className = 'flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition text-sm';
+    }
+}
+
+function showLocalCameraPreview() {
+    removeLocalCameraPreview();
+    if (!cameraStream) return;
+
+    const preview = document.createElement('div');
+    preview.id = 'local-camera-preview';
+    preview.className = 'fixed bottom-24 right-4 w-40 md:w-48 rounded-xl overflow-hidden shadow-lg border-2 border-vc-accent z-40';
+
+    const video = document.createElement('video');
+    video.srcObject = cameraStream;
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.className = 'w-full h-full object-cover mirror';
+    video.style.transform = 'scaleX(-1)';
+
+    preview.appendChild(video);
+    document.body.appendChild(preview);
+}
+
+function removeLocalCameraPreview() {
+    const el = document.getElementById('local-camera-preview');
+    if (el) el.remove();
+}
+
+function handleRemoteCameraTrack(stream, track) {
+    // Find which user this camera belongs to (by checking peers)
+    // For now, use a unique ID from the stream
+    const camId = 'remote-cam-' + stream.id;
+    const existing = document.getElementById(camId);
+    if (existing) {
+        // Update existing video
+        const video = existing.querySelector('video');
+        if (video) {
+            video.srcObject = stream;
+            video.play().catch(() => {});
+        }
+        return;
+    }
+
+    const grid = document.getElementById('camera-grid');
+    if (!grid) {
+        // Create camera grid above user cards
+        createCameraGrid();
+    }
+
+    const container = document.getElementById('camera-grid');
+    if (!container) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.id = camId;
+    wrapper.className = 'rounded-xl overflow-hidden bg-black border border-vc-border aspect-video';
+
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = true;
+    video.className = 'w-full h-full object-cover';
+    video.play().catch(() => {});
+
+    wrapper.appendChild(video);
+    container.appendChild(wrapper);
+
+    // Remove when track ends
+    track.onended = () => {
+        wrapper.remove();
+        cleanupCameraGrid();
+    };
+}
+
+function createCameraGrid() {
+    if (document.getElementById('camera-grid')) return;
+    const anchor = document.getElementById('screen-share-anchor');
+    if (!anchor) return;
+
+    const grid = document.createElement('div');
+    grid.id = 'camera-grid';
+    grid.className = 'grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 w-full max-w-4xl mx-auto';
+    anchor.parentElement.insertBefore(grid, anchor.nextSibling);
+}
+
+function cleanupCameraGrid() {
+    const grid = document.getElementById('camera-grid');
+    if (grid && grid.children.length === 0) {
+        grid.remove();
+    }
+}
+
 function showScreenPreviewPlaceholder() {
     if (!latestScreenPreview) return;
     if (document.getElementById('screen-share-container')) return;
@@ -909,6 +1089,17 @@ function cleanupWebRTC() {
     isScreenSharing = false;
     removeRemoteVideo();
     removeLocalScreenPreview();
+    // Cleanup camera
+    if (cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+    }
+    cameraSender = null;
+    isCameraOn = false;
+    removeLocalCameraPreview();
+    remoteCameras = {};
+    const cameraGrid = document.getElementById('camera-grid');
+    if (cameraGrid) cameraGrid.remove();
     if (peerConnection) {
         peerConnection.close();
         peerConnection = null;
