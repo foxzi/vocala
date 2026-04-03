@@ -4,16 +4,11 @@ services:
     expose:
       - "8090"
     ports:
-      - "3478:3478/udp"        # TURN server
-      - "40000-40200:40000-40200/udp"  # WebRTC UDP media ports
-    environment:
-      - VOCIPHER_DB_PATH=/app/data/vocipher.db
-      - VOCIPHER_ADDR=:8090
-      - VOCIPHER_NAT_IP=${VOCIPHER_NAT_IP:-}
-      # Set to your server's public IP to enable built-in TURN
-      # - VOCIPHER_TURN_IP=203.0.113.1
+      - "3478:3478/udp"
+      - "40000-40200:40000-40200/udp"
     volumes:
       - vocipher-data:/app/data
+      - ./config.yaml:/app/config.yaml:ro
     restart: unless-stopped
 
   nginx:

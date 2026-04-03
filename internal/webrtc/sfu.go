@@ -358,14 +358,38 @@ func (s *SFU) RemovePeer(userID int64) {
 		return
 	}
 	delete(s.peers, userID)
+
+	// Remove output tracks from other peers' PeerConnections
+	needsRenego := make([]*Peer, 0)
 	for _, op := range s.peers {
 		op.mu.Lock()
-		delete(op.outputTracks, userID)
-		delete(op.screenOutputTracks, userID)
-		delete(op.cameraOutputTracks, userID)
+		removed := false
+		for _, tracks := range []map[int64]*webrtc.TrackLocalStaticRTP{
+			op.outputTracks, op.screenOutputTracks, op.cameraOutputTracks,
+		} {
+			if lt, exists := tracks[userID]; exists {
+				// Remove from PeerConnection
+				for _, sender := range op.PC.GetSenders() {
+					if sender.Track() == lt {
+						op.PC.RemoveTrack(sender)
+						break
+					}
+				}
+				delete(tracks, userID)
+				removed = true
+			}
+		}
 		op.mu.Unlock()
+		if removed {
+			needsRenego = append(needsRenego, op)
+		}
 	}
 	s.mu.Unlock()
+
+	// Renegotiate with peers that had tracks removed
+	for _, op := range needsRenego {
+		s.renegotiate(op)
+	}
 
 	if peer.PC.ConnectionState() != webrtc.PeerConnectionStateClosed {
 		peer.PC.Close()
