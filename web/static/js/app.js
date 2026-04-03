@@ -92,6 +92,11 @@ function connectWS() {
 
 function handleWSMessage(msg) {
     switch (msg.type) {
+        case 'error':
+            if (msg.error === 'access_denied') {
+                alert(msg.text || 'Access denied');
+            }
+            break;
         case 'channel_users':
             updateChannelUsers(msg.channel_id, msg.users || []);
             break;
@@ -1741,3 +1746,190 @@ window.addEventListener('popstate', (event) => {
         leaveChannel();
     }
 });
+
+// --- Private channel member management ---
+
+function getCSRFToken() {
+    const match = document.cookie.match(/csrf_token=([^;]+)/);
+    return match ? match[1] : '';
+}
+
+async function openMemberManager(channelId, channelName) {
+    // Remove existing modal
+    const old = document.getElementById('member-modal');
+    if (old) old.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'member-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60';
+    modal.innerHTML = `
+        <div class="bg-vc-sidebar border border-vc-border rounded-xl shadow-2xl w-96 max-h-[80vh] flex flex-col">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-vc-border">
+                <h3 class="text-sm font-bold text-vc-text">${escapeHTML(channelName)} - Members</h3>
+                <button onclick="document.getElementById('member-modal').remove()" class="text-vc-muted hover:text-vc-text transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="p-3 border-b border-vc-border">
+                <div class="flex gap-2 mb-2">
+                    <select id="member-user-select" class="flex-1 px-3 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text focus:outline-none focus:border-vc-accent transition">
+                        <option value="">Loading users...</option>
+                    </select>
+                    <button onclick="addMemberFromSelect(${channelId})" class="px-3 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-sm font-medium rounded-lg transition">Add</button>
+                </div>
+                <button onclick="generateInviteLink(${channelId})" class="w-full px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-text text-sm rounded-lg transition flex items-center justify-center gap-1.5">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/>
+                    </svg>
+                    Generate invite link
+                </button>
+                <div id="invite-link-result" class="hidden mt-2"></div>
+            </div>
+            <div id="member-list" class="flex-1 overflow-y-auto p-2 space-y-1">
+                <div class="text-center text-vc-muted text-xs py-4">Loading...</div>
+            </div>
+        </div>
+    `;
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) modal.remove();
+    });
+    document.body.appendChild(modal);
+    loadMembers(channelId);
+    loadUserSelect(channelId);
+}
+
+async function loadMembers(channelId) {
+    try {
+        const res = await fetch('/channels/members?id=' + channelId);
+        if (res.status === 403) {
+            document.getElementById('member-list').innerHTML = '<div class="text-center text-vc-red text-xs py-4">No permission to manage members</div>';
+            return;
+        }
+        const data = await res.json();
+        const list = document.getElementById('member-list');
+        if (!data.members || data.members.length === 0) {
+            list.innerHTML = '<div class="text-center text-vc-muted text-xs py-4">No members yet</div>';
+            return;
+        }
+        list.innerHTML = data.members.map(m => `
+            <div class="flex items-center justify-between px-2 py-1.5 rounded-lg hover:bg-vc-hover/30 transition">
+                <div class="flex items-center gap-2">
+                    <div class="w-6 h-6 rounded-full bg-vc-accent/30 flex items-center justify-center text-xs font-bold text-vc-accent">${escapeHTML(m.Username.charAt(0))}</div>
+                    <span class="text-sm text-vc-text">${escapeHTML(m.Username)}</span>
+                    ${m.UserID === data.created_by ? '<span class="text-[10px] text-vc-yellow bg-vc-yellow/10 px-1 rounded">owner</span>' : ''}
+                </div>
+                ${m.UserID !== data.created_by ? `
+                    <button onclick="removeMember(${channelId}, ${m.UserID})" class="text-vc-muted hover:text-vc-red transition text-xs px-1.5 py-0.5 rounded hover:bg-vc-red/10">
+                        Remove
+                    </button>
+                ` : ''}
+            </div>
+        `).join('');
+    } catch (err) {
+        console.error('Failed to load members:', err);
+    }
+}
+
+async function loadUserSelect(channelId) {
+    try {
+        const [usersRes, membersRes] = await Promise.all([
+            fetch('/api/users'),
+            fetch('/channels/members?id=' + channelId),
+        ]);
+        const users = await usersRes.json();
+        const membersData = await membersRes.json();
+        const memberIds = new Set((membersData.members || []).map(m => m.UserID));
+
+        const select = document.getElementById('member-user-select');
+        if (!select) return;
+        const available = users.filter(u => !memberIds.has(u.id));
+        if (available.length === 0) {
+            select.innerHTML = '<option value="">All users already added</option>';
+        } else {
+            select.innerHTML = '<option value="">Select user...</option>' +
+                available.map(u => `<option value="${escapeHTML(u.username)}">${escapeHTML(u.username)}</option>`).join('');
+        }
+    } catch (err) {
+        console.error('Failed to load users:', err);
+    }
+}
+
+async function addMemberFromSelect(channelId) {
+    const select = document.getElementById('member-user-select');
+    const username = select ? select.value : '';
+    if (!username) return;
+
+    const form = new FormData();
+    form.append('channel_id', channelId);
+    form.append('username', username);
+    form.append('csrf_token', getCSRFToken());
+
+    try {
+        const res = await fetch('/channels/members/add', { method: 'POST', body: form });
+        if (res.status === 404) {
+            alert('User not found');
+            return;
+        }
+        if (!res.ok) {
+            alert('Failed to add member');
+            return;
+        }
+        loadMembers(channelId);
+        loadUserSelect(channelId);
+    } catch (err) {
+        console.error('Failed to add member:', err);
+    }
+}
+
+async function generateInviteLink(channelId) {
+    const form = new FormData();
+    form.append('channel_id', channelId);
+    form.append('csrf_token', getCSRFToken());
+
+    try {
+        const res = await fetch('/channels/invite', { method: 'POST', body: form });
+        if (!res.ok) {
+            alert('Failed to generate invite link');
+            return;
+        }
+        const data = await res.json();
+        const url = window.location.origin + data.url;
+        const container = document.getElementById('invite-link-result');
+        if (!container) return;
+        container.classList.remove('hidden');
+        container.innerHTML = `
+            <div class="flex gap-1.5">
+                <input type="text" value="${escapeHTML(url)}" readonly
+                    class="flex-1 px-2.5 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-xs text-vc-text font-mono select-all focus:outline-none">
+                <button onclick="navigator.clipboard.writeText('${url}').then(() => this.textContent = 'Copied!')"
+                    class="px-2.5 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-xs font-medium rounded-lg transition whitespace-nowrap">
+                    Copy
+                </button>
+            </div>
+            <div class="text-[10px] text-vc-muted mt-1">Link expires in 7 days</div>
+        `;
+    } catch (err) {
+        console.error('Failed to generate invite:', err);
+    }
+}
+
+async function removeMember(channelId, userId) {
+    const form = new FormData();
+    form.append('channel_id', channelId);
+    form.append('user_id', userId);
+    form.append('csrf_token', getCSRFToken());
+
+    try {
+        const res = await fetch('/channels/members/remove', { method: 'POST', body: form });
+        if (!res.ok) {
+            alert('Failed to remove member');
+            return;
+        }
+        loadMembers(channelId);
+        loadUserSelect(channelId);
+    } catch (err) {
+        console.error('Failed to remove member:', err);
+    }
+}
