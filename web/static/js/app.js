@@ -492,6 +492,30 @@ function leaveChannel() {
     `;
 }
 
+async function deleteChannel(channelId, channelName) {
+    if (!confirm('Delete channel "' + channelName + '"? This cannot be undone.')) return;
+
+    const form = new FormData();
+    form.append('id', channelId);
+    form.append('csrf_token', getCSRFToken());
+
+    try {
+        const res = await fetch('/channels/delete', { method: 'POST', body: form });
+        if (!res.ok) {
+            alert('Failed to delete channel');
+            return;
+        }
+        // If we're in this channel, leave it
+        if (currentChannelID === channelId) {
+            leaveChannel();
+        }
+        // Refresh channel list with HTMX response
+        document.getElementById('channel-list').innerHTML = await res.text();
+    } catch (err) {
+        console.error('Failed to delete channel:', err);
+    }
+}
+
 // ─── Mute / PTT ───────────────────────────────────────────────
 
 function toggleMute() {
