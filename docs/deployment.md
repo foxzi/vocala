@@ -2,181 +2,169 @@
 
 ## English
 
+### Quick Start: deb Package + Nginx
+
+The fastest way to deploy Vocala on a Debian/Ubuntu server.
+
+**1. Install the package:**
+
+```bash
+sudo dpkg -i vocala_0.1.0_amd64.deb
+```
+
+This installs:
+- `/usr/bin/vocala` -- server binary
+- `/etc/vocala/config.yaml` -- server config (created from default on first install)
+- `/etc/vocala/config.yaml.example` -- full documented config example
+- `/etc/vocala/nginx.conf.example` -- Nginx reverse proxy config
+- `/usr/lib/systemd/system/vocala.service` -- systemd unit
+- `/usr/share/vocala/web/` -- templates and static files
+- `/usr/share/doc/vocala/` -- documentation
+
+**2. Edit config:**
+
+```bash
+sudo vim /etc/vocala/config.yaml
+```
+
+Key settings to change:
+
+```yaml
+server:
+  addr: "127.0.0.1:8090"    # bind to localhost (Nginx will proxy)
+
+auth:
+  cookie_secure: true        # required for HTTPS
+
+turn:
+  enabled: true
+  ip: "YOUR_PUBLIC_IP"       # your server's public IP
+  port: 3478
+  tls_port: 5349             # TURNS for mobile clients (optional)
+  tls_host: "YOUR_DOMAIN"   # must match TLS certificate
+  cert_file: "/etc/letsencrypt/live/YOUR_DOMAIN/fullchain.pem"
+  key_file: "/etc/letsencrypt/live/YOUR_DOMAIN/privkey.pem"
+```
+
+**3. Set up Nginx:**
+
+```bash
+# Install Nginx
+sudo apt install nginx
+
+# Copy example config
+sudo cp /etc/vocala/nginx.conf.example /etc/nginx/sites-available/vocala.conf
+
+# Edit: replace YOUR_DOMAIN with your domain
+sudo sed -i 's/YOUR_DOMAIN/voice.example.com/g' /etc/nginx/sites-available/vocala.conf
+
+# Enable site
+sudo ln -s /etc/nginx/sites-available/vocala.conf /etc/nginx/sites-enabled/
+
+# Get TLS certificate
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d voice.example.com
+
+# Test and reload
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**4. Open firewall:**
+
+```bash
+sudo ufw allow 80/tcp       # HTTP (Let's Encrypt + redirect)
+sudo ufw allow 443/tcp      # HTTPS
+sudo ufw allow 3478/udp     # TURN
+sudo ufw allow 5349/tcp     # TURNS (optional, for mobile)
+sudo ufw allow 40000:40200/udp  # WebRTC media
+```
+
+**5. Start Vocala:**
+
+```bash
+sudo systemctl start vocala
+sudo systemctl status vocala
+
+# Check version
+vocala -version
+```
+
+**6. Register first user:**
+
+Open `https://voice.example.com` in your browser. The first registered user automatically becomes the admin.
+
+### Network Diagram
+
+```
+Internet
+    |
+    +-- TCP 443 (HTTPS) --> Nginx --> Vocala :8090
+    +-- TCP 80  (HTTP)  --> Nginx (redirect to HTTPS)
+    |
+    +-- UDP 3478 (TURN)        --> Vocala TURN (direct)
+    +-- TCP 5349 (TURNS/TLS)   --> Vocala TURNS (direct)
+    +-- UDP 40000-40200 (RTP)  --> Vocala SFU (direct)
+```
+
+Nginx proxies HTTP/WebSocket only. TURN, TURNS, and WebRTC media traffic go directly to the Vocala process.
+
+### Package Contents
+
+| Path | Description |
+|------|-------------|
+| `/usr/bin/vocala` | Server binary |
+| `/etc/vocala/config.yaml` | Active config (not overwritten on upgrade) |
+| `/etc/vocala/config.yaml.default` | Default config template |
+| `/etc/vocala/config.yaml.example` | Full documented example |
+| `/etc/vocala/nginx.conf.example` | Nginx reverse proxy config |
+| `/usr/lib/systemd/system/vocala.service` | Systemd service unit |
+| `/usr/share/vocala/web/` | Templates and static files |
+| `/usr/share/doc/vocala/` | Documentation (architecture, config, deployment, security) |
+| `/var/lib/vocala/` | Data directory (SQLite database) |
+
+### Upgrading
+
+```bash
+sudo dpkg -i vocala_NEW_VERSION_amd64.deb
+# Service restarts automatically
+```
+
+Config at `/etc/vocala/config.yaml` is preserved on upgrade.
+
 ### Local Development
 
 ```bash
-# Build and run
-make run
-
-# Or build separately
-make build
-./vocala
+make run                    # build and run
+make build                  # build binary only
+./vocala -version           # check version
+./vocala -config my.yaml    # custom config
 ```
-
-Server starts at `http://localhost:8090`.
 
 ### Docker
 
 ```bash
-# Start
+cp .env.example .env
+# Edit .env: set VOCALA_NAT_IP to your host IP
+
+# With self-signed cert:
+./nginx/generate-cert.sh ./nginx/certs
+
 docker compose up -d
-
-# View logs
-docker compose logs -f
-
-# Stop
-docker compose down
+# Access at https://<your-ip>
 ```
-
-The database is stored on a Docker named volume (`vocala-data`), so data survives container restarts.
-
-### Docker with TURN
-
-Edit `docker-compose.yaml` and uncomment the `VOCALA_TURN_IP` line with your server's public IP:
-
-```yaml
-environment:
-  - VOCALA_DB_PATH=/app/data/vocala.db
-  - VOCALA_ADDR=:8090
-  - VOCALA_TURN_IP=203.0.113.1  # your public IP
-```
-
-Make sure UDP port 3478 is open in your firewall.
-
-### Production with Nginx + HTTPS
-
-For production, Nginx handles TLS termination and proxies to Vocala.
-
-**Network diagram:**
-
-```
-Internet
-    │
-    ├── TCP 443 (HTTPS) ──> Nginx ──> Vocala :8090
-    ├── TCP 80  (HTTP)  ──> Nginx (redirect to HTTPS)
-    │
-    └── UDP 3478 (TURN) ──> Vocala TURN (direct, bypasses Nginx)
-```
-
-**Important:** Nginx does NOT proxy TURN/UDP traffic. TURN works directly between clients and the Vocala process.
-
-**Nginx configuration example:**
-
-```nginx
-server {
-    listen 80;
-    server_name voice.example.com;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl http2;
-    server_name voice.example.com;
-
-    ssl_certificate     /etc/letsencrypt/live/voice.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/voice.example.com/privkey.pem;
-
-    # Security headers
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-
-    # Proxy to Vocala
-    location / {
-        proxy_pass http://127.0.0.1:8090;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # WebSocket
-    location /ws {
-        proxy_pass http://127.0.0.1:8090/ws;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 86400s;
-        proxy_send_timeout 86400s;
-    }
-
-    # Static files (optional: serve directly for performance)
-    location /static/ {
-        proxy_pass http://127.0.0.1:8090/static/;
-        expires 7d;
-        add_header Cache-Control "public, immutable";
-    }
-}
-```
-
-**Let's Encrypt setup:**
-
-```bash
-sudo apt install certbot python3-certbot-nginx
-sudo certbot --nginx -d voice.example.com
-```
-
-**Vocala configuration for Nginx:**
-
-```bash
-VOCALA_ADDR=127.0.0.1:8090 \
-VOCALA_TURN_IP=203.0.113.1 \
-./vocala
-```
-
-Bind to `127.0.0.1` so Vocala is only accessible through Nginx, not directly from the internet.
 
 ### Firewall Rules
 
 | Port | Protocol | Service | Access |
 |------|----------|---------|--------|
-| 80 | TCP | HTTP (Nginx) | Public (redirects to HTTPS) |
+| 80 | TCP | HTTP (Nginx) | Public (redirect to HTTPS) |
 | 443 | TCP | HTTPS (Nginx) | Public |
 | 3478 | UDP | TURN | Public |
+| 5349 | TCP | TURNS (TLS) | Public (optional, for mobile) |
+| 40000-40200 | UDP | WebRTC media (RTP) | Public |
 | 8090 | TCP | Vocala HTTP | Localhost only (behind Nginx) |
 
-```bash
-# UFW example
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
-sudo ufw allow 3478/udp
-```
-
-### Docker Compose with Nginx (included)
-
-The default `docker-compose.yaml` includes both Vocala and Nginx with HTTPS:
-
-```bash
-# 1. Generate self-signed certificate
-./nginx/generate-cert.sh ./nginx/certs
-
-# 2. Configure host IP
-cp .env.example .env
-# Edit .env: set VOCALA_NAT_IP=<your-host-ip>
-
-# 3. Start
-docker compose up -d
-
-# Access at https://<your-host-ip>
-```
-
-The `.env` file is required for WebRTC to work in Docker -- without `VOCALA_NAT_IP`, ICE candidates will advertise the container's internal IP and peers won't be able to connect.
-
-### Ports Summary
-
-| Component | Default Port | Protocol | Configurable |
-|-----------|-------------|----------|--------------|
-| HTTP server | 8090 | TCP | `VOCALA_ADDR` (internal) |
-| Nginx HTTP | 80 | TCP | docker-compose.yaml |
-| Nginx HTTPS | 443 | TCP | docker-compose.yaml |
-| TURN server | 3478 | UDP | Not yet (hardcoded) |
-| WebRTC media | 50000-50100 | UDP | sfu.go `SetEphemeralUDPPortRange` |
-
 ### Health Check
-
-Vocala does not have a dedicated health endpoint. You can check the login page:
 
 ```bash
 curl -o /dev/null -w "%{http_code}" http://localhost:8090/login
@@ -187,71 +175,122 @@ curl -o /dev/null -w "%{http_code}" http://localhost:8090/login
 
 ## Русский
 
-### Локальная разработка
+### Быстрый старт: deb-пакет + Nginx
+
+Самый быстрый способ развернуть Vocala на Debian/Ubuntu сервере.
+
+**1. Установка пакета:**
 
 ```bash
-make run    # Сборка и запуск
-make build  # Только сборка
-./vocala  # Запуск
+sudo dpkg -i vocala_0.1.0_amd64.deb
 ```
 
-Сервер стартует на `http://localhost:8090`.
+Устанавливается:
+- `/usr/bin/vocala` -- бинарник сервера
+- `/etc/vocala/config.yaml` -- конфиг (создаётся при первой установке)
+- `/etc/vocala/nginx.conf.example` -- пример конфига Nginx
+- `/usr/lib/systemd/system/vocala.service` -- systemd юнит
+- `/usr/share/vocala/web/` -- шаблоны и статика
+- `/usr/share/doc/vocala/` -- документация
 
-### Docker
+**2. Настройка конфига:**
 
 ```bash
-docker compose up -d     # Запуск
-docker compose logs -f   # Логи
-docker compose down      # Остановка
+sudo vim /etc/vocala/config.yaml
 ```
 
-База данных хранится в Docker named volume, данные сохраняются при перезапуске контейнера.
+Ключевые настройки:
 
-### Docker с TURN
+```yaml
+server:
+  addr: "127.0.0.1:8090"    # только localhost (Nginx проксирует)
 
-В `docker-compose.yaml` раскомментируйте строку `VOCALA_TURN_IP`, указав публичный IP сервера. Убедитесь, что UDP порт 3478 открыт в файрволе.
+auth:
+  cookie_secure: true        # обязательно для HTTPS
 
-### Продакшен с Nginx + HTTPS
+turn:
+  enabled: true
+  ip: "ВАШ_ПУБЛИЧНЫЙ_IP"
+  tls_host: "ВАШ_ДОМЕН"     # должен совпадать с TLS-сертификатом
+  cert_file: "/etc/letsencrypt/live/ВАШ_ДОМЕН/fullchain.pem"
+  key_file: "/etc/letsencrypt/live/ВАШ_ДОМЕН/privkey.pem"
+```
 
-В продакшене Nginx выполняет TLS-терминацию и проксирует трафик к Vocala.
+**3. Настройка Nginx:**
 
-**Схема сети:**
+```bash
+# Установка Nginx
+sudo apt install nginx
+
+# Копирование примера конфига
+sudo cp /etc/vocala/nginx.conf.example /etc/nginx/sites-available/vocala.conf
+
+# Замена YOUR_DOMAIN на ваш домен
+sudo sed -i 's/YOUR_DOMAIN/voice.example.com/g' /etc/nginx/sites-available/vocala.conf
+
+# Включение сайта
+sudo ln -s /etc/nginx/sites-available/vocala.conf /etc/nginx/sites-enabled/
+
+# Получение TLS-сертификата
+sudo apt install certbot python3-certbot-nginx
+sudo certbot --nginx -d voice.example.com
+
+# Проверка и перезагрузка
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**4. Файрвол:**
+
+```bash
+sudo ufw allow 80/tcp       # HTTP
+sudo ufw allow 443/tcp      # HTTPS
+sudo ufw allow 3478/udp     # TURN
+sudo ufw allow 5349/tcp     # TURNS (опционально, для мобильных)
+sudo ufw allow 40000:40200/udp  # WebRTC media
+```
+
+**5. Запуск:**
+
+```bash
+sudo systemctl start vocala
+sudo systemctl status vocala
+vocala -version
+```
+
+**6. Регистрация:** откройте `https://voice.example.com` в браузере. Первый пользователь автоматически становится админом.
+
+### Обновление
+
+```bash
+sudo dpkg -i vocala_НОВАЯ_ВЕРСИЯ_amd64.deb
+# Сервис перезапускается автоматически
+```
+
+Конфиг `/etc/vocala/config.yaml` сохраняется при обновлении.
+
+### Схема сети
 
 ```
 Интернет
-    │
-    ├── TCP 443 (HTTPS) ──> Nginx ──> Vocala :8090
-    ├── TCP 80  (HTTP)  ──> Nginx (редирект на HTTPS)
-    │
-    └── UDP 3478 (TURN) ──> Vocala TURN (напрямую, минуя Nginx)
+    |
+    +-- TCP 443 (HTTPS) --> Nginx --> Vocala :8090
+    +-- TCP 80  (HTTP)  --> Nginx (редирект на HTTPS)
+    |
+    +-- UDP 3478 (TURN)        --> Vocala TURN (напрямую)
+    +-- TCP 5349 (TURNS/TLS)   --> Vocala TURNS (напрямую)
+    +-- UDP 40000-40200 (RTP)  --> Vocala SFU (напрямую)
 ```
 
-**Важно:** Nginx НЕ проксирует TURN/UDP трафик. TURN работает напрямую между клиентами и Vocala.
+Nginx проксирует только HTTP/WebSocket. TURN, TURNS и WebRTC media идут напрямую к процессу Vocala.
 
-Пример конфигурации Nginx и настройки Let's Encrypt см. в английской версии выше.
+### Содержимое пакета
 
-**Конфигурация Vocala за Nginx:**
-
-```bash
-VOCALA_ADDR=127.0.0.1:8090 \
-VOCALA_TURN_IP=203.0.113.1 \
-./vocala
-```
-
-Привязка к `127.0.0.1` делает Vocala доступным только через Nginx.
-
-### Правила файрвола
-
-| Порт | Протокол | Сервис | Доступ |
-|------|----------|--------|--------|
-| 80 | TCP | HTTP (Nginx) | Публичный (редирект на HTTPS) |
-| 443 | TCP | HTTPS (Nginx) | Публичный |
-| 3478 | UDP | TURN | Публичный |
-| 8090 | TCP | Vocala HTTP | Только localhost (за Nginx) |
-
-### Проверка работоспособности
-
-```bash
-curl -o /dev/null -w "%{http_code}" http://localhost:8090/login
-# Ожидается: 200
-```
+| Путь | Описание |
+|------|----------|
+| `/usr/bin/vocala` | Бинарник сервера |
+| `/etc/vocala/config.yaml` | Активный конфиг (не перезаписывается при обновлении) |
+| `/etc/vocala/nginx.conf.example` | Пример конфига Nginx |
+| `/usr/lib/systemd/system/vocala.service` | Systemd юнит |
+| `/usr/share/vocala/web/` | Шаблоны и статика |
+| `/usr/share/doc/vocala/` | Документация |
+| `/var/lib/vocala/` | Директория данных (SQLite) |

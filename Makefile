@@ -1,10 +1,13 @@
+VERSION ?= 0.1.0
+LDFLAGS = -ldflags "-X main.version=$(VERSION)"
+
 .PHONY: run build clean package deb rpm
 
 run:
-	CGO_ENABLED=1 go run ./cmd/server/
+	CGO_ENABLED=1 go run $(LDFLAGS) ./cmd/server/
 
 build:
-	CGO_ENABLED=1 go build -o vocala ./cmd/server/
+	CGO_ENABLED=1 go build $(LDFLAGS) -o vocala ./cmd/server/
 
 clean:
 	rm -f vocala vocala.db vocala.db-wal vocala.db-shm

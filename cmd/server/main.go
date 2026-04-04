@@ -30,6 +30,9 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// Set via ldflags: -ldflags "-X main.version=0.1.0"
+var version = "dev"
+
 var templates map[string]*template.Template
 var cacheBust = fmt.Sprintf("%d", time.Now().Unix())
 var cfg *config.Config
@@ -173,8 +176,14 @@ func sessionCookie(token string, maxAge int) *http.Cookie {
 // --- Main ---
 
 func main() {
+	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("vocala", version)
+		os.Exit(0)
+	}
 
 	cfg = config.Load(*configPath)
 

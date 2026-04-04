@@ -1,7 +1,7 @@
 name: vocala
 arch: amd64
 platform: linux
-version: v0.2.0
+version: v0.1.0
 maintainer: Vocala <noreply@vocala.dev>
 description: Self-hosted voice chat server with WebRTC SFU
 vendor: Vocala
@@ -30,9 +30,25 @@ contents:
   - src: ./config.yaml.example
     dst: /etc/vocala/config.yaml.example
 
+  # Nginx example
+  - src: ./packaging/nginx/vocala.conf
+    dst: /etc/vocala/nginx.conf.example
+
   # Systemd
   - src: ./packaging/vocala.service
     dst: /usr/lib/systemd/system/vocala.service
+
+  # Documentation
+  - src: ./docs/architecture.md
+    dst: /usr/share/doc/vocala/architecture.md
+  - src: ./docs/configuration.md
+    dst: /usr/share/doc/vocala/configuration.md
+  - src: ./docs/deployment.md
+    dst: /usr/share/doc/vocala/deployment.md
+  - src: ./docs/security.md
+    dst: /usr/share/doc/vocala/security.md
+  - src: ./README.md
+    dst: /usr/share/doc/vocala/README.md
 
 scripts:
   postinstall: ./packaging/postinstall.sh
