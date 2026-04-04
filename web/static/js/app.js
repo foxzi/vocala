@@ -1957,3 +1957,70 @@ async function removeMember(channelId, userId) {
         console.error('Failed to remove member:', err);
     }
 }
+
+// --- Theme picker ---
+
+const THEMES = [
+    { id: 'default',    name: 'Default',    color: '#7c5cfc' },
+    { id: 'midnight',   name: 'Midnight',   color: '#4f8ff7' },
+    { id: 'forest',     name: 'Forest',     color: '#34d399' },
+    { id: 'cherry',     name: 'Cherry',     color: '#f43f5e' },
+    { id: 'amber',      name: 'Amber',      color: '#f59e0b' },
+    { id: 'abyss',      name: 'Abyss',      color: '#a78bfa' },
+    { id: 'light',      name: 'Light',      color: '#f5f5f7', border: '#d1d5db' },
+    { id: 'light-warm', name: 'Warm Light', color: '#faf7f2', border: '#d6cfc5' },
+    { id: 'light-sky',  name: 'Sky Light',  color: '#f0f7ff', border: '#bdd0e0' },
+];
+
+function setTheme(themeId) {
+    document.documentElement.setAttribute('data-theme', themeId);
+    localStorage.setItem('vocala-theme', themeId);
+    // Update active indicator
+    document.querySelectorAll('.theme-dot').forEach(el => {
+        el.classList.toggle('ring-2', el.dataset.theme === themeId);
+        el.classList.toggle('ring-white', el.dataset.theme === themeId);
+        el.classList.toggle('ring-offset-2', el.dataset.theme === themeId);
+        el.classList.toggle('ring-offset-vc-sidebar', el.dataset.theme === themeId);
+    });
+}
+
+function toggleThemePicker() {
+    const existing = document.getElementById('theme-picker');
+    if (existing) { existing.remove(); return; }
+
+    const current = localStorage.getItem('vocala-theme') || 'default';
+    const picker = document.createElement('div');
+    picker.id = 'theme-picker';
+    picker.className = 'absolute bottom-14 left-2 bg-vc-channel border border-vc-border rounded-xl p-3 shadow-2xl z-50 fade-in';
+    picker.innerHTML = `
+        <div class="text-xs font-medium text-vc-muted mb-2">Theme</div>
+        <div class="flex gap-2 flex-wrap max-w-[230px]">
+            ${THEMES.map(t => `
+                <button onclick="setTheme('${t.id}')" title="${t.name}"
+                    class="theme-dot w-7 h-7 rounded-full transition-all hover:scale-110 ${t.id === current ? 'ring-2 ring-white ring-offset-2 ring-offset-vc-sidebar' : ''}"
+                    data-theme="${t.id}"
+                    style="background: ${t.color}${t.border ? '; box-shadow: inset 0 0 0 2px ' + t.border : ''}">
+                </button>
+            `).join('')}
+        </div>
+    `;
+
+    // Close on outside click
+    setTimeout(() => {
+        document.addEventListener('click', function closePicker(e) {
+            if (!picker.contains(e.target) && !e.target.closest('[title="Theme"]')) {
+                picker.remove();
+                document.removeEventListener('click', closePicker);
+            }
+        });
+    }, 0);
+
+    // Find the sidebar bottom panel to position relative to
+    const bottomBar = document.querySelector('.border-t.border-vc-border .flex.items-center');
+    if (bottomBar) {
+        bottomBar.style.position = 'relative';
+        bottomBar.appendChild(picker);
+    } else {
+        document.body.appendChild(picker);
+    }
+}

@@ -13,18 +13,18 @@
                 extend: {
                     colors: {
                         vc: {
-                            bg: '#0f0f13',
-                            sidebar: '#16161d',
-                            channel: '#1c1c27',
-                            hover: '#24243a',
-                            accent: '#7c5cfc',
-                            accent2: '#5c8afc',
-                            green: '#43b581',
-                            red: '#f04747',
-                            yellow: '#faa61a',
-                            text: '#dcddde',
-                            muted: '#72767d',
-                            border: '#2a2a3a',
+                            bg: 'var(--vc-bg)',
+                            sidebar: 'var(--vc-sidebar)',
+                            channel: 'var(--vc-channel)',
+                            hover: 'var(--vc-hover)',
+                            accent: 'var(--vc-accent)',
+                            accent2: 'var(--vc-accent2)',
+                            green: 'var(--vc-green)',
+                            red: 'var(--vc-red)',
+                            yellow: 'var(--vc-yellow)',
+                            text: 'var(--vc-text)',
+                            muted: 'var(--vc-muted)',
+                            border: 'var(--vc-border)',
                         }
                     }
                 }
@@ -46,7 +46,142 @@
             from { opacity: 0; transform: translateY(-4px); }
             to { opacity: 1; transform: translateY(0); }
         }
+
+        /* ── Theme definitions ── */
+        :root, [data-theme="default"] {
+            --vc-bg: #0f0f13;
+            --vc-sidebar: #16161d;
+            --vc-channel: #1c1c27;
+            --vc-hover: #24243a;
+            --vc-accent: #7c5cfc;
+            --vc-accent2: #5c8afc;
+            --vc-green: #43b581;
+            --vc-red: #f04747;
+            --vc-yellow: #faa61a;
+            --vc-text: #dcddde;
+            --vc-muted: #72767d;
+            --vc-border: #2a2a3a;
+        }
+        [data-theme="midnight"] {
+            --vc-bg: #0b1426;
+            --vc-sidebar: #0f1a30;
+            --vc-channel: #142040;
+            --vc-hover: #1a2d52;
+            --vc-accent: #4f8ff7;
+            --vc-accent2: #3b7cf5;
+            --vc-green: #43b581;
+            --vc-red: #f04747;
+            --vc-yellow: #faa61a;
+            --vc-text: #d0d8e8;
+            --vc-muted: #5a6a88;
+            --vc-border: #1e3050;
+        }
+        [data-theme="forest"] {
+            --vc-bg: #0c1510;
+            --vc-sidebar: #111e16;
+            --vc-channel: #16271c;
+            --vc-hover: #1e3626;
+            --vc-accent: #34d399;
+            --vc-accent2: #22c55e;
+            --vc-green: #4ade80;
+            --vc-red: #f04747;
+            --vc-yellow: #fbbf24;
+            --vc-text: #d1e5d8;
+            --vc-muted: #5a7a66;
+            --vc-border: #1e3828;
+        }
+        [data-theme="cherry"] {
+            --vc-bg: #150c10;
+            --vc-sidebar: #1e1116;
+            --vc-channel: #27161c;
+            --vc-hover: #361e28;
+            --vc-accent: #f43f5e;
+            --vc-accent2: #e11d48;
+            --vc-green: #43b581;
+            --vc-red: #f43f5e;
+            --vc-yellow: #fbbf24;
+            --vc-text: #e5d1d8;
+            --vc-muted: #7a5a66;
+            --vc-border: #38202a;
+        }
+        [data-theme="amber"] {
+            --vc-bg: #141008;
+            --vc-sidebar: #1c1710;
+            --vc-channel: #251e14;
+            --vc-hover: #342a1c;
+            --vc-accent: #f59e0b;
+            --vc-accent2: #d97706;
+            --vc-green: #43b581;
+            --vc-red: #f04747;
+            --vc-yellow: #f59e0b;
+            --vc-text: #e5ddd1;
+            --vc-muted: #7a7060;
+            --vc-border: #362c1e;
+        }
+        [data-theme="abyss"] {
+            --vc-bg: #080810;
+            --vc-sidebar: #0c0c18;
+            --vc-channel: #10101f;
+            --vc-hover: #181830;
+            --vc-accent: #a78bfa;
+            --vc-accent2: #8b5cf6;
+            --vc-green: #43b581;
+            --vc-red: #f04747;
+            --vc-yellow: #faa61a;
+            --vc-text: #ccc8e0;
+            --vc-muted: #605880;
+            --vc-border: #1e1a38;
+        }
+        [data-theme="light"] {
+            --vc-bg: #f5f5f7;
+            --vc-sidebar: #ebedf0;
+            --vc-channel: #e3e5e8;
+            --vc-hover: #d8dbe0;
+            --vc-accent: #5865f2;
+            --vc-accent2: #4752c4;
+            --vc-green: #2d9b6a;
+            --vc-red: #d83c3e;
+            --vc-yellow: #d9860b;
+            --vc-text: #1a1c20;
+            --vc-muted: #6b7280;
+            --vc-border: #d1d5db;
+        }
+        [data-theme="light-warm"] {
+            --vc-bg: #faf7f2;
+            --vc-sidebar: #f0ebe3;
+            --vc-channel: #e8e0d4;
+            --vc-hover: #ddd3c4;
+            --vc-accent: #b45309;
+            --vc-accent2: #92400e;
+            --vc-green: #2d9b6a;
+            --vc-red: #d83c3e;
+            --vc-yellow: #d97706;
+            --vc-text: #1c1917;
+            --vc-muted: #78716c;
+            --vc-border: #d6cfc5;
+        }
+        [data-theme="light-sky"] {
+            --vc-bg: #f0f7ff;
+            --vc-sidebar: #e4eff8;
+            --vc-channel: #d6e6f2;
+            --vc-hover: #c6d9ea;
+            --vc-accent: #0284c7;
+            --vc-accent2: #0369a1;
+            --vc-green: #2d9b6a;
+            --vc-red: #d83c3e;
+            --vc-yellow: #d9860b;
+            --vc-text: #0c1824;
+            --vc-muted: #5a7088;
+            --vc-border: #bdd0e0;
+        }
     </style>
+    <script>
+        // Apply saved theme before render to avoid flash
+        (function() {
+            var t = localStorage.getItem('vocala-theme') || 'default';
+            document.documentElement.setAttribute('data-theme', t);
+        })();
+    </script>
 </head>
 <body class="h-full bg-vc-bg text-vc-text dark">
     {{block "content" .}}{{end}}
