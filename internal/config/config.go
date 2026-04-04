@@ -47,11 +47,12 @@ type TURNConfig struct {
 }
 
 type AuthConfig struct {
-	SessionDays    int  `yaml:"session_days"`
-	MinPassword    int  `yaml:"min_password"`
-	CookieSecure   bool `yaml:"cookie_secure"`
-	RateLimitRPS   int  `yaml:"rate_limit_rps"`
-	RateLimitBurst int  `yaml:"rate_limit_burst"`
+	SessionDays         int  `yaml:"session_days"`
+	MinPassword         int  `yaml:"min_password"`
+	CookieSecure        bool `yaml:"cookie_secure"`
+	RegistrationEnabled bool `yaml:"registration_enabled"`
+	RateLimitRPS        int  `yaml:"rate_limit_rps"`
+	RateLimitBurst      int  `yaml:"rate_limit_burst"`
 }
 
 type SecurityConfig struct {
@@ -81,11 +82,12 @@ func Default() *Config {
 			TLSPort: 5349,
 		},
 		Auth: AuthConfig{
-			SessionDays:    30,
-			MinPassword:    8,
-			CookieSecure:   false,
-			RateLimitRPS:   10,
-			RateLimitBurst: 20,
+			SessionDays:         30,
+			MinPassword:         8,
+			CookieSecure:        false,
+			RegistrationEnabled: true,
+			RateLimitRPS:        10,
+			RateLimitBurst:      20,
 		},
 	}
 }
@@ -136,5 +138,10 @@ func envOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("VOCALA_COOKIE_SECURE"); v == "true" || v == "1" {
 		cfg.Auth.CookieSecure = true
+	}
+	if v := os.Getenv("VOCALA_REGISTRATION"); v == "false" || v == "0" {
+		cfg.Auth.RegistrationEnabled = false
+	} else if v == "true" || v == "1" {
+		cfg.Auth.RegistrationEnabled = true
 	}
 }

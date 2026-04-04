@@ -29,6 +29,7 @@ auth:
   session_days: 30          # Session expiry in days
   min_password: 8           # Minimum password length
   cookie_secure: false      # Set to true when using HTTPS
+  registration_enabled: true  # Set false to disable public registration
   rate_limit_rps: 10        # Requests per second per IP
   rate_limit_burst: 20      # Burst limit
 

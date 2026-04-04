@@ -27,6 +27,48 @@
         </div>
         {{end}}
 
+        <!-- Add User -->
+        <div class="bg-vc-sidebar rounded-xl border border-vc-border overflow-hidden mb-6">
+            <div class="px-6 py-4 border-b border-vc-border flex items-center justify-between">
+                <h2 class="text-lg font-semibold">Add User</h2>
+                <div class="flex items-center gap-2 text-sm">
+                    <span class="text-vc-muted">Registration:</span>
+                    {{if .RegistrationEnabled}}
+                    <span class="text-vc-green">Enabled</span>
+                    {{else}}
+                    <span class="text-vc-red">Disabled</span>
+                    {{end}}
+                    <span class="text-vc-muted text-xs">(config.yaml)</span>
+                </div>
+            </div>
+            <div class="p-4">
+                <form method="POST" action="/admin/users/create" class="flex flex-wrap items-end gap-3">
+                    <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+                    <div>
+                        <label class="block text-xs text-vc-muted mb-1">Username</label>
+                        <input type="text" name="username" required minlength="2" placeholder="username"
+                            class="px-3 py-2 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition w-40">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-vc-muted mb-1">Password</label>
+                        <input type="password" name="password" required minlength="8" placeholder="min 8 chars"
+                            class="px-3 py-2 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition w-40">
+                    </div>
+                    <label class="flex items-center gap-1.5 cursor-pointer">
+                        <input type="checkbox" name="is_active" checked class="rounded border-vc-border text-vc-accent focus:ring-vc-accent">
+                        <span class="text-sm text-vc-muted">Active</span>
+                    </label>
+                    <label class="flex items-center gap-1.5 cursor-pointer">
+                        <input type="checkbox" name="is_admin" class="rounded border-vc-border text-vc-accent focus:ring-vc-accent">
+                        <span class="text-sm text-vc-muted">Admin</span>
+                    </label>
+                    <button type="submit" class="px-4 py-2 bg-vc-accent hover:bg-vc-accent/80 text-white text-sm font-medium rounded-lg transition">
+                        Create User
+                    </button>
+                </form>
+            </div>
+        </div>
+
         <!-- Users Table -->
         <div class="bg-vc-sidebar rounded-xl border border-vc-border overflow-hidden">
             <div class="px-6 py-4 border-b border-vc-border">

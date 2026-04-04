@@ -175,6 +175,138 @@ func sessionCookie(token string, maxAge int) *http.Cookie {
 
 // --- Main ---
 
+func runCLI(args []string) {
+	switch args[0] {
+	case "user-add":
+		if len(args) < 3 {
+			fmt.Println("Usage: vocala user-add USERNAME PASSWORD [--admin] [--active]")
+			os.Exit(1)
+		}
+		username, password := args[1], args[2]
+		if len(password) < cfg.Auth.MinPassword {
+			fmt.Printf("Password must be at least %d characters\n", cfg.Auth.MinPassword)
+			os.Exit(1)
+		}
+		user, err := auth.Register(username, password)
+		if err != nil {
+			fmt.Printf("Failed to create user: %v\n", err)
+			os.Exit(1)
+		}
+		for _, a := range args[3:] {
+			switch a {
+			case "--admin":
+				auth.SetUserAdmin(user.ID, true)
+			case "--active":
+				auth.SetUserActive(user.ID, true)
+			}
+		}
+		fmt.Printf("Created user: %s (id=%d)\n", username, user.ID)
+
+	case "user-delete":
+		if len(args) < 2 {
+			fmt.Println("Usage: vocala user-delete USERNAME")
+			os.Exit(1)
+		}
+		u, err := auth.GetUserByUsername(args[1])
+		if err != nil {
+			fmt.Printf("User not found: %s\n", args[1])
+			os.Exit(1)
+		}
+		if err := auth.DeleteUser(u.ID); err != nil {
+			fmt.Printf("Failed to delete user: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Deleted user: %s\n", u.Username)
+
+	case "user-activate":
+		if len(args) < 2 {
+			fmt.Println("Usage: vocala user-activate USERNAME")
+			os.Exit(1)
+		}
+		u, err := auth.GetUserByUsername(args[1])
+		if err != nil {
+			fmt.Printf("User not found: %s\n", args[1])
+			os.Exit(1)
+		}
+		auth.SetUserActive(u.ID, true)
+		fmt.Printf("Activated user: %s\n", u.Username)
+
+	case "user-deactivate":
+		if len(args) < 2 {
+			fmt.Println("Usage: vocala user-deactivate USERNAME")
+			os.Exit(1)
+		}
+		u, err := auth.GetUserByUsername(args[1])
+		if err != nil {
+			fmt.Printf("User not found: %s\n", args[1])
+			os.Exit(1)
+		}
+		auth.SetUserActive(u.ID, false)
+		fmt.Printf("Deactivated user: %s\n", u.Username)
+
+	case "user-admin":
+		if len(args) < 2 {
+			fmt.Println("Usage: vocala user-admin USERNAME [--revoke]")
+			os.Exit(1)
+		}
+		u, err := auth.GetUserByUsername(args[1])
+		if err != nil {
+			fmt.Printf("User not found: %s\n", args[1])
+			os.Exit(1)
+		}
+		revoke := len(args) > 2 && args[2] == "--revoke"
+		auth.SetUserAdmin(u.ID, !revoke)
+		if revoke {
+			fmt.Printf("Revoked admin from: %s\n", u.Username)
+		} else {
+			fmt.Printf("Granted admin to: %s\n", u.Username)
+		}
+
+	case "user-password":
+		if len(args) < 3 {
+			fmt.Println("Usage: vocala user-password USERNAME NEWPASSWORD")
+			os.Exit(1)
+		}
+		u, err := auth.GetUserByUsername(args[1])
+		if err != nil {
+			fmt.Printf("User not found: %s\n", args[1])
+			os.Exit(1)
+		}
+		if len(args[2]) < cfg.Auth.MinPassword {
+			fmt.Printf("Password must be at least %d characters\n", cfg.Auth.MinPassword)
+			os.Exit(1)
+		}
+		if err := auth.SetUserPassword(u.ID, args[2]); err != nil {
+			fmt.Printf("Failed to reset password: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Password reset for: %s\n", u.Username)
+
+	case "user-list":
+		users, err := auth.ListUsers()
+		if err != nil {
+			fmt.Printf("Failed to list users: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%-4s %-20s %-8s %-8s %s\n", "ID", "USERNAME", "ADMIN", "ACTIVE", "CREATED")
+		for _, u := range users {
+			fmt.Printf("%-4d %-20s %-8v %-8v %s\n", u.ID, u.Username, u.IsAdmin, u.IsActive, u.CreatedAt.Format("2006-01-02 15:04"))
+		}
+
+	default:
+		fmt.Printf("Unknown command: %s\n", args[0])
+		fmt.Println("Available commands:")
+		fmt.Println("  user-add USERNAME PASSWORD [--admin] [--active]")
+		fmt.Println("  user-delete USERNAME")
+		fmt.Println("  user-activate USERNAME")
+		fmt.Println("  user-deactivate USERNAME")
+		fmt.Println("  user-admin USERNAME [--revoke]")
+		fmt.Println("  user-password USERNAME NEWPASSWORD")
+		fmt.Println("  user-list")
+		os.Exit(1)
+	}
+}
+
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	configPath := flag.String("config", "config.yaml", "path to config file")
@@ -183,6 +315,15 @@ func main() {
 	if *showVersion {
 		fmt.Println("vocala", version)
 		os.Exit(0)
+	}
+
+	// CLI subcommands: vocala -config ... user-add USERNAME PASSWORD
+	args := flag.Args()
+	if len(args) > 0 {
+		cfg = config.Load(*configPath)
+		database.Init(cfg.Database.Path)
+		runCLI(args)
+		return
 	}
 
 	cfg = config.Load(*configPath)
@@ -271,6 +412,7 @@ func main() {
 
 	// Admin routes
 	mux.HandleFunc("/admin", requireAdmin(handleAdmin))
+	mux.HandleFunc("/admin/users/create", requireAdmin(csrfProtect(handleAdminCreateUser)))
 	mux.HandleFunc("/admin/users/activate", requireAdmin(csrfProtect(handleAdminActivate)))
 	mux.HandleFunc("/admin/users/deactivate", requireAdmin(csrfProtect(handleAdminDeactivate)))
 	mux.HandleFunc("/admin/users/make-admin", requireAdmin(csrfProtect(handleAdminMakeAdmin)))
@@ -360,8 +502,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		csrfToken := setCSRFCookie(w, r)
 		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{
-			"CSRFToken": csrfToken,
-			"Next":      r.URL.Query().Get("next"),
+			"CSRFToken":           csrfToken,
+			"Next":                r.URL.Query().Get("next"),
+			"RegistrationEnabled": cfg.Auth.RegistrationEnabled,
 		})
 		return
 	}
@@ -419,6 +562,14 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleRegister(w http.ResponseWriter, r *http.Request) {
+	if !cfg.Auth.RegistrationEnabled {
+		csrfToken := setCSRFCookie(w, r)
+		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{
+			"Info":      "Registration is disabled. Contact an administrator.",
+			"CSRFToken": csrfToken,
+		})
+		return
+	}
 	if r.Method == http.MethodGet {
 		if user := auth.UserFromRequest(r); user != nil && user.IsActive {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -645,9 +796,10 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 
 	csrfToken := setCSRFCookie(w, r)
 	data := map[string]any{
-		"Users":     users,
-		"CSRFToken": csrfToken,
-		"Flash":     r.URL.Query().Get("flash"),
+		"Users":               users,
+		"CSRFToken":           csrfToken,
+		"Flash":               r.URL.Query().Get("flash"),
+		"RegistrationEnabled": cfg.Auth.RegistrationEnabled,
 	}
 	templates["admin.html"].ExecuteTemplate(w, "layout.html", data)
 }
@@ -676,6 +828,35 @@ func adminUserAction(w http.ResponseWriter, r *http.Request, action func(int64) 
 	}
 
 	http.Redirect(w, r, "/admin?flash="+flash, http.StatusSeeOther)
+}
+
+func handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	username := r.FormValue("username")
+	password := r.FormValue("password")
+	if len(username) < 2 || len(password) < cfg.Auth.MinPassword {
+		http.Redirect(w, r, "/admin?flash=Username+min+2+chars,+password+min+8", http.StatusSeeOther)
+		return
+	}
+
+	user, err := auth.Register(username, password)
+	if err != nil {
+		http.Redirect(w, r, "/admin?flash=Failed:+"+err.Error(), http.StatusSeeOther)
+		return
+	}
+
+	if r.FormValue("is_active") == "on" {
+		auth.SetUserActive(user.ID, true)
+	}
+	if r.FormValue("is_admin") == "on" {
+		auth.SetUserAdmin(user.ID, true)
+	}
+
+	http.Redirect(w, r, "/admin?flash=User+"+username+"+created", http.StatusSeeOther)
 }
 
 func handleAdminActivate(w http.ResponseWriter, r *http.Request) {

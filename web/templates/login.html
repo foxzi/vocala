@@ -46,10 +46,12 @@
             </button>
         </form>
 
+        {{if .RegistrationEnabled}}
         <div class="mt-6 text-center">
             <p class="text-vc-muted text-sm">Don't have an account?</p>
             <a href="/register" class="text-vc-accent hover:text-vc-accent2 text-sm font-medium transition">Create one</a>
         </div>
+        {{end}}
     </div>
 </div>
 {{end}}
