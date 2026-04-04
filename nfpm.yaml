@@ -20,6 +20,8 @@ contents:
     dst: /usr/share/vocala/web/templates/
   - src: ./web/static/js/
     dst: /usr/share/vocala/web/static/js/
+  - src: ./web/static/img/
+    dst: /usr/share/vocala/web/static/img/
 
   # Config
   - src: ./packaging/config.yaml.default
