@@ -10,6 +10,66 @@ function escapeHTML(str) {
     return div.innerHTML;
 }
 
+// --- Sound notifications (Web Audio API, no external files) ---
+
+let notifSoundsEnabled = localStorage.getItem('vocala-sounds') !== 'off';
+
+function playTone(freq, duration, type, vol) {
+    if (!notifSoundsEnabled) return;
+    try {
+        const ctx = new AudioContext();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = type || 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(vol || 0.15, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start();
+        osc.stop(ctx.currentTime + duration);
+        setTimeout(() => ctx.close(), (duration + 0.1) * 1000);
+    } catch (e) {}
+}
+
+function playJoinSound() {
+    playTone(520, 0.12, 'sine', 0.12);
+    setTimeout(() => playTone(660, 0.12, 'sine', 0.12), 80);
+    setTimeout(() => playTone(780, 0.15, 'sine', 0.10), 160);
+}
+
+function playLeaveSound() {
+    playTone(660, 0.12, 'sine', 0.10);
+    setTimeout(() => playTone(520, 0.15, 'sine', 0.08), 100);
+}
+
+function playChatSound() {
+    playTone(880, 0.08, 'sine', 0.08);
+    setTimeout(() => playTone(1100, 0.1, 'sine', 0.06), 60);
+}
+
+function toggleSounds() {
+    notifSoundsEnabled = !notifSoundsEnabled;
+    localStorage.setItem('vocala-sounds', notifSoundsEnabled ? 'on' : 'off');
+    return notifSoundsEnabled;
+}
+
+// --- Browser notifications ---
+
+function requestNotificationPermission() {
+    if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission();
+    }
+}
+
+function showNotification(text) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    if (!document.hidden) return; // Only when tab is not focused
+    try {
+        new Notification('Vocala', { body: text, icon: '/static/img/favicon.svg', tag: 'vocala-notif' });
+    } catch (e) {}
+}
+
 // Local pixel-art avatar by username hash
 const AVATAR_COUNT = 50;
 function avatarURL(username) {
@@ -175,10 +235,32 @@ function sendWS(msg) {
 
 // ─── Channel Users UI ─────────────────────────────────────────
 
+// Track users per channel for join/leave sound detection
+const channelUserSets = {};
+
 function updateChannelUsers(channelID, users) {
     const container = document.getElementById(`ch-users-${channelID}`);
     const countEl = document.getElementById(`ch-count-${channelID}`);
     if (!container) return;
+
+    // Detect join/leave in current channel for sounds + notifications
+    if (channelID === currentChannelID) {
+        const oldSet = channelUserSets[channelID] || new Set();
+        const newSet = new Set(users.map(u => u.Username));
+        const selfName = document.getElementById('self-avatar')?.dataset?.username;
+        for (const name of newSet) {
+            if (!oldSet.has(name) && name !== selfName && oldSet.size > 0) {
+                playJoinSound();
+                showNotification(name + ' joined the channel');
+            }
+        }
+        for (const name of oldSet) {
+            if (!newSet.has(name) && name !== selfName) {
+                playLeaveSound();
+            }
+        }
+        channelUserSets[channelID] = newSet;
+    }
 
     // Sort for stable order
     users.sort((a, b) => a.Username.localeCompare(b.Username));
@@ -568,12 +650,14 @@ function togglePTT() {
 async function startWebRTC() {
     try {
         // Get microphone access
+        const audioConstraints = {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+        };
+        if (selectedMicId) audioConstraints.deviceId = { exact: selectedMicId };
         localStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: true,
-                autoGainControl: true,
-            },
+            audio: audioConstraints,
             video: false,
         });
 
@@ -619,6 +703,14 @@ async function startWebRTC() {
                 const audio = new Audio();
                 audio.srcObject = event.streams[0];
                 audio.autoplay = true;
+                // Apply selected speaker
+                if (selectedSpkId && audio.setSinkId) {
+                    audio.setSinkId(selectedSpkId).catch(() => {});
+                }
+                // Track audio element for per-user volume
+                const audioStreamId = event.streams[0]?.id || '';
+                audio.dataset.streamId = audioStreamId;
+                document.body.appendChild(audio); // keep reference for volume control
                 audio.play().catch(() => {});
             } else if (event.track.kind === 'video') {
                 const stream = event.streams[0] || new MediaStream([event.track]);
@@ -958,8 +1050,10 @@ async function toggleCamera() {
 async function startCamera() {
     if (!peerConnection) return;
     try {
+        const camConstraints = { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' };
+        if (selectedCamId) camConstraints.deviceId = { exact: selectedCamId };
         cameraStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+            video: camConstraints,
             audio: false,
         });
 
@@ -1413,6 +1507,7 @@ if (selfAvatar && selfAvatar.dataset.username) {
 
 connectWS();
 checkMicPermission();
+requestNotificationPermission();
 
 async function checkMicPermission() {
     try {
@@ -1490,12 +1585,19 @@ function loadChatHistory(messages) {
     const container = document.getElementById('chat-messages');
     if (!container) return;
     container.innerHTML = '';
-    messages.forEach(msg => appendChatMessage(msg));
+    messages.forEach(msg => appendChatMessage({ ...msg, _history: true }));
 }
 
 function appendChatMessage(msg) {
     const container = document.getElementById('chat-messages');
     if (!container) return;
+
+    // Sound + notification for messages from others (not history load)
+    const selfName = document.getElementById('self-avatar')?.dataset?.username;
+    if (msg.username !== selfName && !msg._history) {
+        playChatSound();
+        if (document.hidden) showNotification(msg.username + ': ' + msg.text);
+    }
 
     const el = document.createElement('div');
     el.id = 'msg-' + msg.id;
@@ -2062,4 +2164,136 @@ function toggleThemePicker() {
     } else {
         document.body.appendChild(picker);
     }
+}
+
+// --- Settings modal (devices, sounds) ---
+
+let selectedMicId = localStorage.getItem('vocala-mic') || '';
+let selectedCamId = localStorage.getItem('vocala-cam') || '';
+let selectedSpkId = localStorage.getItem('vocala-spk') || '';
+
+async function openSettings() {
+    const old = document.getElementById('settings-modal');
+    if (old) old.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'settings-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60';
+    modal.innerHTML = `
+        <div class="bg-vc-sidebar border border-vc-border rounded-xl shadow-2xl w-[420px] max-h-[80vh] flex flex-col">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-vc-border">
+                <h3 class="text-sm font-bold text-vc-text">Settings</h3>
+                <button onclick="document.getElementById('settings-modal').remove()" class="text-vc-muted hover:text-vc-text transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="p-4 space-y-4 overflow-y-auto">
+                <div>
+                    <label class="block text-xs font-medium text-vc-muted mb-1">Microphone</label>
+                    <select id="settings-mic" class="w-full px-3 py-2 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text focus:outline-none focus:border-vc-accent transition">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-vc-muted mb-1">Camera</label>
+                    <select id="settings-cam" class="w-full px-3 py-2 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text focus:outline-none focus:border-vc-accent transition">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-vc-muted mb-1">Speaker</label>
+                    <select id="settings-spk" class="w-full px-3 py-2 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text focus:outline-none focus:border-vc-accent transition">
+                        <option value="">Loading...</option>
+                    </select>
+                </div>
+                <div class="border-t border-vc-border pt-3">
+                    <label class="flex items-center justify-between cursor-pointer">
+                        <span class="text-sm text-vc-text">Sound notifications</span>
+                        <input type="checkbox" id="settings-sounds" ${notifSoundsEnabled ? 'checked' : ''}
+                            class="rounded border-vc-border text-vc-accent focus:ring-vc-accent"
+                            onchange="toggleSounds()">
+                    </label>
+                </div>
+            </div>
+            <div class="px-4 py-3 border-t border-vc-border flex justify-end">
+                <button onclick="saveSettings()" class="px-4 py-2 bg-vc-accent hover:bg-vc-accent/80 text-white text-sm font-medium rounded-lg transition">
+                    Save
+                </button>
+            </div>
+        </div>
+    `;
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) modal.remove();
+    });
+    document.body.appendChild(modal);
+    await loadDeviceList();
+}
+
+async function loadDeviceList() {
+    try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const micSelect = document.getElementById('settings-mic');
+        const camSelect = document.getElementById('settings-cam');
+        const spkSelect = document.getElementById('settings-spk');
+
+        const mics = devices.filter(d => d.kind === 'audioinput');
+        const cams = devices.filter(d => d.kind === 'videoinput');
+        const spks = devices.filter(d => d.kind === 'audiooutput');
+
+        micSelect.innerHTML = '<option value="">Default</option>' +
+            mics.map(d => `<option value="${d.deviceId}" ${d.deviceId === selectedMicId ? 'selected' : ''}>${escapeHTML(d.label || 'Microphone ' + (mics.indexOf(d) + 1))}</option>`).join('');
+        camSelect.innerHTML = '<option value="">Default</option>' +
+            cams.map(d => `<option value="${d.deviceId}" ${d.deviceId === selectedCamId ? 'selected' : ''}>${escapeHTML(d.label || 'Camera ' + (cams.indexOf(d) + 1))}</option>`).join('');
+        spkSelect.innerHTML = '<option value="">Default</option>' +
+            spks.map(d => `<option value="${d.deviceId}" ${d.deviceId === selectedSpkId ? 'selected' : ''}>${escapeHTML(d.label || 'Speaker ' + (spks.indexOf(d) + 1))}</option>`).join('');
+    } catch (e) {
+        console.error('Failed to enumerate devices:', e);
+    }
+}
+
+function saveSettings() {
+    const mic = document.getElementById('settings-mic')?.value || '';
+    const cam = document.getElementById('settings-cam')?.value || '';
+    const spk = document.getElementById('settings-spk')?.value || '';
+
+    selectedMicId = mic;
+    selectedCamId = cam;
+    selectedSpkId = spk;
+    localStorage.setItem('vocala-mic', mic);
+    localStorage.setItem('vocala-cam', cam);
+    localStorage.setItem('vocala-spk', spk);
+
+    // Apply speaker to all audio/video elements
+    if (spk) {
+        document.querySelectorAll('audio, video').forEach(el => {
+            if (el.setSinkId) el.setSinkId(spk).catch(() => {});
+        });
+    }
+
+    document.getElementById('settings-modal')?.remove();
+}
+
+
+
+function adjustUserVolume(username, value) {
+    const vol = parseInt(value) / 100;
+    setUserVolume(username, vol);
+    // Apply volume to all remote audio elements
+    // SFU assigns streamID "audio-{userID}" but we need username->userID mapping
+    // For now, apply to all audio (works well with small groups)
+    document.querySelectorAll('audio').forEach(el => {
+        el.volume = vol;
+    });
+}
+
+function getUserVolume(username) {
+    if (userVolumes[username] !== undefined) return userVolumes[username];
+    const saved = localStorage.getItem('vocala-vol-' + username);
+    if (saved !== null) {
+        userVolumes[username] = parseFloat(saved);
+        return userVolumes[username];
+    }
+    return 1.0;
 }
