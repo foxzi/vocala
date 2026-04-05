@@ -43,13 +43,15 @@ type Message struct {
 }
 
 type Client struct {
-	UserID    int64
-	Username  string
-	IsAdmin   bool
-	Conn      *websocket.Conn
-	Send      chan []byte // text JSON messages
-	SendMedia chan []byte // binary media frames
-	IsWSMedia bool        // true if this client uses WS media transport (mobile)
+	UserID         int64
+	Username       string
+	IsAdmin        bool
+	Conn           *websocket.Conn
+	Send           chan []byte // text JSON messages
+	SendMedia      chan []byte // binary media frames
+	IsWSMedia      bool        // true if this client uses WS media transport (mobile)
+	IsGuest        bool
+	GuestChannelID int64 // if guest, restrict to this channel only
 }
 
 type Hub struct {
@@ -129,25 +131,53 @@ func (h *Hub) SendTo(userID int64, msg []byte) {
 }
 
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	var client *Client
+
+	isGuestMode := r.URL.Query().Get("guest") == "1"
+
 	user := auth.UserFromRequest(r)
-	if user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		logger.Info("websocket upgrade error:", err)
-		return
-	}
-
-	client := &Client{
-		UserID:    user.ID,
-		Username:  user.Username,
-		IsAdmin:   user.IsAdmin,
-		Conn:      conn,
-		Send:      make(chan []byte, 256),
-		SendMedia: make(chan []byte, 64),
+	if user != nil && !isGuestMode {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			logger.Info("websocket upgrade error: %v", err)
+			return
+		}
+		client = &Client{
+			UserID:    user.ID,
+			Username:  user.Username,
+			IsAdmin:   user.IsAdmin,
+			Conn:      conn,
+			Send:      make(chan []byte, 256),
+			SendMedia: make(chan []byte, 64),
+		}
+	} else {
+		// Try guest session
+		cookie, err := r.Cookie("guest_session")
+		if err != nil || cookie.Value == "" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		gs, err := channel.ValidateGuestSession(cookie.Value)
+		if err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			logger.Info("websocket upgrade error: %v", err)
+			return
+		}
+		// Use negative ID to avoid collision with real users
+		guestID := -(time.Now().UnixNano() % 1000000)
+		client = &Client{
+			UserID:         guestID,
+			Username:       gs.GuestName + " (guest)",
+			IsGuest:        true,
+			GuestChannelID: gs.ChannelID,
+			Conn:           conn,
+			Send:           make(chan []byte, 256),
+			SendMedia:      make(chan []byte, 64),
+		}
 	}
 
 	GlobalHub.Register(client)
@@ -264,8 +294,19 @@ func handleMessage(c *Client, msg Message) {
 		}
 		json.Unmarshal(msg.Payload, &p)
 
+		// Guests can only join their assigned channel
+		if c.IsGuest && p.ChannelID != c.GuestChannelID {
+			errMsg, _ := json.Marshal(map[string]any{
+				"type":  "error",
+				"error": "access_denied",
+				"text":  "Guests can only join their invited channel",
+			})
+			GlobalHub.SendTo(c.UserID, errMsg)
+			return
+		}
+
 		// Check access for private channels
-		if !channel.CanJoin(p.ChannelID, c.UserID, c.IsAdmin) {
+		if !c.IsGuest && !channel.CanJoin(p.ChannelID, c.UserID, c.IsAdmin) {
 			errMsg, _ := json.Marshal(map[string]any{
 				"type":  "error",
 				"error": "access_denied",
@@ -395,6 +436,12 @@ func handleMessage(c *Client, msg Message) {
 		if sfu != nil {
 			sfu.SetExpectCamera(c.UserID, false)
 		}
+		// Notify other clients to remove camera
+		msg, _ := json.Marshal(map[string]any{
+			"type":    "camera_off",
+			"user_id": c.UserID,
+		})
+		GlobalHub.BroadcastToChannel(chID, msg)
 
 	case "ws_media_mode":
 		c.IsWSMedia = true

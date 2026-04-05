@@ -117,7 +117,8 @@ let lastServerOfferTime = 0;
 
 function connectWS() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${proto}//${location.host}/ws`);
+    const wsParams = window.VOCALA_GUEST_CHANNEL ? '?guest=1' : '';
+    ws = new WebSocket(`${proto}//${location.host}/ws${wsParams}`);
 
     ws.onopen = () => {
         reconnectAttempts = 0;
@@ -133,6 +134,9 @@ function connectWS() {
             startWebRTC().then(() => {
                 if (wasCameraOn) startCamera();
             });
+        } else if (window.VOCALA_GUEST_CHANNEL) {
+            // Guest auto-join their assigned channel
+            joinChannel(window.VOCALA_GUEST_CHANNEL, '');
         } else if (window.VOCALA_AUTO_JOIN) {
             // Auto-join from URL on first connect
             autoJoinFromURL();
@@ -183,6 +187,11 @@ function handleWSMessage(msg) {
         case 'ice_candidate':
             handleRemoteICECandidate(msg.payload);
             break;
+        case 'camera_off':
+            // Remove remote camera when user turns it off
+            const camEl = document.getElementById('remote-cam-camera-' + msg.user_id);
+            if (camEl) { camEl.remove(); updateGridColumns(); }
+            break;
         case 'chat_message':
             appendChatMessage(msg);
             break;
@@ -217,12 +226,14 @@ function handleWSMessage(msg) {
 function setConnectionStatus(state) {
     const el = document.getElementById('connection-status');
     const rtcEl = document.getElementById('rtc-status');
-    if (state === 'connected') {
-        el.textContent = 'Connected';
-        el.className = 'text-xs text-vc-green';
-    } else if (state === 'reconnecting') {
-        el.textContent = 'Reconnecting...';
-        el.className = 'text-xs text-vc-yellow';
+    if (el) {
+        if (state === 'connected') {
+            el.textContent = 'Connected';
+            el.className = 'text-xs text-vc-green';
+        } else if (state === 'reconnecting') {
+            el.textContent = 'Reconnecting...';
+            el.className = 'text-xs text-vc-yellow';
+        }
     }
     if (rtcEl) updateRTCStatus();
 }
@@ -241,7 +252,6 @@ const channelUserSets = {};
 function updateChannelUsers(channelID, users) {
     const container = document.getElementById(`ch-users-${channelID}`);
     const countEl = document.getElementById(`ch-count-${channelID}`);
-    if (!container) return;
 
     // Detect join/leave in current channel for sounds + notifications
     if (channelID === currentChannelID) {
@@ -265,51 +275,52 @@ function updateChannelUsers(channelID, users) {
     // Sort for stable order
     users.sort((a, b) => a.Username.localeCompare(b.Username));
 
-    if (countEl) {
-        countEl.textContent = users.length > 0 ? `${users.length} connected` : '';
+    // Update sidebar (may not exist for guests)
+    if (container) {
+        if (countEl) {
+            countEl.textContent = users.length > 0 ? `${users.length} connected` : '';
+        }
+
+        const currentUsernames = new Set(users.map(u => u.Username));
+        const existingItems = container.querySelectorAll('[data-sidebar-user]');
+        const existingMap = {};
+        existingItems.forEach(el => { existingMap[el.dataset.sidebarUser] = el; });
+
+        existingItems.forEach(el => {
+            if (!currentUsernames.has(el.dataset.sidebarUser)) el.remove();
+        });
+
+        users.forEach(u => {
+            const existing = existingMap[u.Username];
+            if (existing) {
+                const avatar = existing.querySelector('.sb-avatar');
+                if (avatar) avatar.className = `sb-avatar w-6 h-6 rounded-full ${u.Speaking ? 'ring-2 ring-vc-green/40' : ''} overflow-hidden`;
+                const name = existing.querySelector('.sb-name');
+                if (name) name.className = `sb-name ${u.Muted ? 'text-vc-muted line-through' : 'text-vc-text'}`;
+                const muteIcon = existing.querySelector('.sb-mute');
+                if (muteIcon) muteIcon.style.display = u.Muted ? '' : 'none';
+                const speakingEl = existing.querySelector('.sb-speaking');
+                if (speakingEl) speakingEl.style.display = u.Speaking ? '' : 'none';
+            } else {
+                const div = document.createElement('div');
+                div.dataset.sidebarUser = u.Username;
+                div.className = 'flex items-center gap-2 px-2 py-1 rounded text-sm fade-in';
+                div.innerHTML = `
+                    <div class="relative">
+                        <div class="sb-avatar w-6 h-6 rounded-full ${u.Speaking ? 'ring-2 ring-vc-green/40' : ''} overflow-hidden">
+                            <img src="${avatarURL(u.Username)}" alt="" class="w-full h-full">
+                        </div>
+                    </div>
+                    <span class="sb-name ${u.Muted ? 'text-vc-muted line-through' : 'text-vc-text'}">${escapeHTML(u.Username)}</span>
+                    <svg class="sb-mute w-3 h-3 text-vc-red ml-auto" fill="currentColor" viewBox="0 0 24 24" style="display:${u.Muted ? '' : 'none'}"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>
+                    <div class="sb-speaking ml-auto flex gap-0.5" style="display:${u.Speaking ? '' : 'none'}"><div class="w-1 h-3 bg-vc-accent rounded-full animate-pulse"></div><div class="w-1 h-4 bg-vc-accent rounded-full animate-pulse" style="animation-delay:0.1s"></div><div class="w-1 h-2 bg-vc-accent rounded-full animate-pulse" style="animation-delay:0.2s"></div></div>
+                `;
+                container.appendChild(div);
+            }
+        });
     }
 
-    const currentUsernames = new Set(users.map(u => u.Username));
-    const existingItems = container.querySelectorAll('[data-sidebar-user]');
-    const existingMap = {};
-    existingItems.forEach(el => { existingMap[el.dataset.sidebarUser] = el; });
-
-    // Remove users no longer present
-    existingItems.forEach(el => {
-        if (!currentUsernames.has(el.dataset.sidebarUser)) el.remove();
-    });
-
-    // Add or update each user
-    users.forEach(u => {
-        const existing = existingMap[u.Username];
-        if (existing) {
-            // Update in place
-            const avatar = existing.querySelector('.sb-avatar');
-            if (avatar) avatar.className = `sb-avatar w-6 h-6 rounded-full ${u.Speaking ? 'ring-2 ring-vc-green/40' : ''} overflow-hidden`;
-            const name = existing.querySelector('.sb-name');
-            if (name) name.className = `sb-name ${u.Muted ? 'text-vc-muted line-through' : 'text-vc-text'}`;
-            const muteIcon = existing.querySelector('.sb-mute');
-            if (muteIcon) muteIcon.style.display = u.Muted ? '' : 'none';
-            const speakingEl = existing.querySelector('.sb-speaking');
-            if (speakingEl) speakingEl.style.display = u.Speaking ? '' : 'none';
-        } else {
-            const div = document.createElement('div');
-            div.dataset.sidebarUser = u.Username;
-            div.className = 'flex items-center gap-2 px-2 py-1 rounded text-sm fade-in';
-            div.innerHTML = `
-                <div class="relative">
-                    <div class="sb-avatar w-6 h-6 rounded-full ${u.Speaking ? 'ring-2 ring-vc-green/40' : ''} overflow-hidden">
-                        <img src="${avatarURL(u.Username)}" alt="" class="w-full h-full">
-                    </div>
-                </div>
-                <span class="sb-name ${u.Muted ? 'text-vc-muted line-through' : 'text-vc-text'}">${escapeHTML(u.Username)}</span>
-                <svg class="sb-mute w-3 h-3 text-vc-red ml-auto" fill="currentColor" viewBox="0 0 24 24" style="display:${u.Muted ? '' : 'none'}"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>
-                <div class="sb-speaking ml-auto flex gap-0.5" style="display:${u.Speaking ? '' : 'none'}"><div class="w-1 h-3 bg-vc-accent rounded-full animate-pulse"></div><div class="w-1 h-4 bg-vc-accent rounded-full animate-pulse" style="animation-delay:0.1s"></div><div class="w-1 h-2 bg-vc-accent rounded-full animate-pulse" style="animation-delay:0.2s"></div></div>
-            `;
-            container.appendChild(div);
-        }
-    });
-
+    // Update main content user cards
     if (channelID === currentChannelID) {
         updateMainContent(channelID, users);
     }
@@ -363,7 +374,9 @@ function joinChannel(channelID, channelName) {
     sendWS({ type: 'join_channel', payload: { channel_id: channelID } });
 
     // Update URL to permanent link
-    history.pushState({ channelID, channelName }, '', '/channels/' + encodeURIComponent(channelName));
+    if (!window.VOCALA_GUEST_CHANNEL) {
+        history.pushState({ channelID, channelName }, '', '/channels/' + encodeURIComponent(channelName));
+    }
 
     // Close sidebar on mobile and update mobile header
     closeSidebarOnMobile();
@@ -382,7 +395,10 @@ function joinChannel(channelID, channelName) {
                     <div class="w-2 h-2 rounded-full bg-vc-yellow animate-pulse"></div>
                     <span class="text-xs text-vc-yellow">Connecting...</span>
                 </div>
-                <button onclick="leaveChannel()" class="ml-auto px-3 py-1.5 bg-vc-red/20 hover:bg-vc-red/30 text-vc-red text-xs md:text-sm font-medium rounded-lg transition flex-shrink-0">
+                ${window.VOCALA_GUEST_CHANNEL ? '' : `<button onclick="createGuestLink(${channelID})" class="ml-auto px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-muted hover:text-vc-text text-xs md:text-sm rounded-lg transition flex-shrink-0 border border-vc-border" title="Generate guest invite link">
+                    Guest Link
+                </button>`}
+                <button onclick="leaveChannel()" class="px-3 py-1.5 bg-vc-red/20 hover:bg-vc-red/30 text-vc-red text-xs md:text-sm font-medium rounded-lg transition flex-shrink-0">
                     Leave
                 </button>
             </div>
@@ -474,6 +490,18 @@ function joinChannel(channelID, channelName) {
 function updateMainContent(channelID, users) {
     const container = document.getElementById('channel-view-users');
     if (!container) return;
+
+    // Clean up camera grid for users who left
+    const cameraGrid = document.getElementById('camera-grid');
+    if (cameraGrid) {
+        const userIds = new Set(users.map(u => String(u.ID)));
+        cameraGrid.querySelectorAll('[id^="remote-cam-camera-"]').forEach(el => {
+            // id = "remote-cam-camera-{userID}", extract userID
+            const uid = el.id.replace('remote-cam-camera-', '');
+            if (!userIds.has(uid)) el.remove();
+        });
+        updateGridColumns();
+    }
 
     // Sort users consistently by username to prevent reordering
     users.sort((a, b) => a.Username.localeCompare(b.Username));
@@ -783,10 +811,56 @@ async function startWebRTC() {
         });
 
     } catch (err) {
-        console.error('WebRTC setup failed:', err);
-        updateRTCStatusText('error', 'Mic access denied');
-        showGlobalMicWarning();
-        // Force muted state when mic is unavailable
+        console.error('WebRTC mic setup failed, trying receive-only:', err);
+        // Create peer connection without microphone (receive-only mode)
+        // This allows seeing camera/screen/hearing audio from others
+        try {
+            const iceServers = window.VOCALA_ICE_SERVERS || [
+                { urls: 'stun:stun.l.google.com:19302' },
+            ];
+            const rtcConfig = { iceServers };
+            peerConnection = new RTCPeerConnection(rtcConfig);
+
+            // Add receive-only audio transceiver
+            peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+
+            peerConnection.ontrack = (event) => {
+                if (event.track.kind === 'audio') {
+                    const audio = new Audio();
+                    audio.srcObject = event.streams[0];
+                    audio.autoplay = true;
+                    if (selectedSpkId && audio.setSinkId) {
+                        audio.setSinkId(selectedSpkId).catch(() => {});
+                    }
+                    document.body.appendChild(audio);
+                    audio.play().catch(() => {});
+                } else if (event.track.kind === 'video') {
+                    const stream = event.streams[0] || new MediaStream([event.track]);
+                    const streamId = stream.id || '';
+                    if (streamId.startsWith('camera')) {
+                        const mid = event.transceiver ? event.transceiver.mid : null;
+                        handleRemoteCameraTrack(stream, event.track, mid);
+                    } else {
+                        showRemoteVideo(stream, event.track);
+                    }
+                }
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    sendWS({ type: 'ice_candidate', payload: { candidate: event.candidate } });
+                }
+            };
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            sendWS({ type: 'webrtc_offer', payload: { sdp: offer.sdp } });
+            updateRTCStatusText('connected', 'Listen-only (no mic)');
+        } catch (err2) {
+            console.error('Receive-only WebRTC also failed:', err2);
+            updateRTCStatusText('error', 'WebRTC failed');
+        }
+
         if (!isMuted) {
             isMuted = true;
             sendWS({ type: 'mute', payload: { muted: true } });
@@ -796,9 +870,11 @@ async function startWebRTC() {
 }
 
 function updateMuteUI() {
-    // Update sidebar icons
-    document.getElementById('icon-mic').classList.toggle('hidden', isMuted);
-    document.getElementById('icon-mic-off').classList.toggle('hidden', !isMuted);
+    // Update sidebar icons (may not exist for guests)
+    const micIcon = document.getElementById('icon-mic');
+    const micOffIcon = document.getElementById('icon-mic-off');
+    if (micIcon) micIcon.classList.toggle('hidden', isMuted);
+    if (micOffIcon) micOffIcon.classList.toggle('hidden', !isMuted);
 
     // Update main content button
     const mainBtn = document.getElementById('main-mute-btn');
@@ -2163,6 +2239,56 @@ function toggleThemePicker() {
         bottomBar.appendChild(picker);
     } else {
         document.body.appendChild(picker);
+    }
+}
+
+// --- Guest invite link ---
+
+async function createGuestLink(channelId) {
+    const form = new FormData();
+    form.append('channel_id', channelId);
+    form.append('hours', '24');
+    form.append('csrf_token', getCSRFToken());
+
+    try {
+        const res = await fetch('/channels/guest-invite', { method: 'POST', body: form });
+        if (!res.ok) {
+            alert('Failed to create guest link');
+            return;
+        }
+        const data = await res.json();
+        const url = window.location.origin + data.url;
+
+        // Show inline popup
+        const existing = document.getElementById('guest-link-popup');
+        if (existing) existing.remove();
+
+        const popup = document.createElement('div');
+        popup.id = 'guest-link-popup';
+        popup.className = 'fixed top-20 right-4 bg-vc-sidebar border border-vc-border rounded-xl shadow-2xl p-4 z-50 w-80 fade-in';
+        popup.innerHTML = `
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-sm font-bold text-vc-text">Guest Invite Link</span>
+                <button onclick="document.getElementById('guest-link-popup').remove()" class="text-vc-muted hover:text-vc-text">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="flex gap-1.5 mb-1">
+                <input type="text" value="${escapeHTML(url)}" readonly
+                    class="flex-1 px-2.5 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-xs text-vc-text font-mono select-all focus:outline-none">
+                <button onclick="navigator.clipboard.writeText('${url}').then(() => this.textContent = 'Copied!')"
+                    class="px-2.5 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-xs font-medium rounded-lg transition whitespace-nowrap">
+                    Copy
+                </button>
+            </div>
+            <div class="text-[10px] text-vc-muted">Expires in ${data.hours}h. Guest sees only this channel.</div>
+        `;
+        document.body.appendChild(popup);
+        setTimeout(() => popup.remove(), 30000);
+    } catch (err) {
+        console.error('Failed to create guest link:', err);
     }
 }
 

@@ -53,7 +53,7 @@ var funcMap = template.FuncMap{
 
 func loadTemplates() map[string]*template.Template {
 	layoutFile := filepath.Join("web", "templates", "layout.html")
-	pages := []string{"login.html", "register.html", "app.html", "admin.html"}
+	pages := []string{"login.html", "register.html", "app.html", "admin.html", "guest.html", "guest-app.html"}
 	t := make(map[string]*template.Template, len(pages))
 	for _, page := range pages {
 		t[page] = template.Must(
@@ -142,6 +142,21 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 }
 
 // --- Security headers (#9) ---
+
+func buildICEServers() []map[string]any {
+	servers := []map[string]any{
+		{"urls": "stun:stun.l.google.com:19302"},
+		{"urls": "stun:stun1.l.google.com:19302"},
+	}
+	if creds := rtc.GetTURNCredentials(); creds != nil {
+		servers = append(servers, map[string]any{
+			"urls":       creds.URIs,
+			"username":   creds.Username,
+			"credential": creds.Password,
+		})
+	}
+	return servers
+}
 
 var httpsDetected sync.Once
 
@@ -494,6 +509,11 @@ func main() {
 	mux.HandleFunc("/api/users", requireAuth(handleAPIUsers))
 	mux.HandleFunc("/account/password", requireAuth(csrfProtect(handleChangePassword)))
 
+	// Guest routes
+	mux.HandleFunc("/guest/", handleGuest)
+	mux.HandleFunc("/guest-app", handleGuestApp)
+	mux.HandleFunc("/channels/guest-invite", requireAuth(csrfProtect(handleCreateGuestInvite)))
+
 	// Admin routes
 	mux.HandleFunc("/admin", requireAdmin(handleAdmin))
 	mux.HandleFunc("/admin/users/create", requireAdmin(csrfProtect(handleAdminCreateUser)))
@@ -760,18 +780,7 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 
 	csrfToken := setCSRFCookie(w, r)
 
-	// Build ICE servers config for client
-	iceServers := []map[string]any{
-		{"urls": "stun:stun.l.google.com:19302"},
-		{"urls": "stun:stun1.l.google.com:19302"},
-	}
-	if creds := rtc.GetTURNCredentials(); creds != nil {
-		iceServers = append(iceServers, map[string]any{
-			"urls":       creds.URIs,
-			"username":   creds.Username,
-			"credential": creds.Password,
-		})
-	}
+	iceServers := buildICEServers()
 
 	data := map[string]any{
 		"User":            user,
@@ -1234,4 +1243,149 @@ func handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Redirect(w, r, "/channels/"+ch.Name, http.StatusSeeOther)
+}
+
+// --- Guest access ---
+
+func handleGuest(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/guest/")
+	if token == "" || token == "leave" {
+		// Guest leave — clear cookie and redirect
+		http.SetCookie(w, &http.Cookie{Name: "guest_session", Value: "", Path: "/", MaxAge: -1})
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	chID, err := channel.ValidateGuestInvite(token)
+	if err != nil {
+		http.Error(w, "Invalid or expired guest link", http.StatusBadRequest)
+		return
+	}
+	ch, err := channel.GetByID(chID)
+	if err != nil {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		csrfToken := setCSRFCookie(w, r)
+		templates["guest.html"].ExecuteTemplate(w, "layout.html", map[string]any{
+			"Token":       token,
+			"ChannelName": ch.Name,
+			"ChannelID":   ch.ID,
+			"CSRFToken":   csrfToken,
+		})
+		return
+	}
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// CSRF check
+	cookieToken, err2 := r.Cookie("csrf_token")
+	formToken := r.FormValue("csrf_token")
+	if err2 != nil || cookieToken.Value == "" || cookieToken.Value != formToken {
+		http.Error(w, "invalid CSRF token", http.StatusForbidden)
+		return
+	}
+
+	guestName := strings.TrimSpace(r.FormValue("guest_name"))
+	if guestName == "" || len(guestName) > 30 {
+		csrfToken := setCSRFCookie(w, r)
+		templates["guest.html"].ExecuteTemplate(w, "layout.html", map[string]any{
+			"Token":       token,
+			"ChannelName": ch.Name,
+			"ChannelID":   ch.ID,
+			"CSRFToken":   csrfToken,
+			"Error":       "Name must be 1-30 characters",
+		})
+		return
+	}
+
+	// Create guest session (same duration as invite remaining time)
+	sessionToken, err := channel.CreateGuestSession(guestName, chID, token, 24)
+	if err != nil {
+		http.Error(w, "Failed to create guest session", http.StatusInternalServerError)
+		return
+	}
+
+	secure := cfg.Auth.CookieSecure
+	http.SetCookie(w, &http.Cookie{
+		Name:     "guest_session",
+		Value:    sessionToken,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400,
+	})
+
+	http.Redirect(w, r, "/guest-app", http.StatusSeeOther)
+}
+
+func handleGuestApp(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie("guest_session")
+	if err != nil || cookie.Value == "" {
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	gs, err := channel.ValidateGuestSession(cookie.Value)
+	if err != nil {
+		http.SetCookie(w, &http.Cookie{Name: "guest_session", Value: "", Path: "/", MaxAge: -1})
+		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+
+	ch, err := channel.GetByID(gs.ChannelID)
+	if err != nil {
+		http.Error(w, "Channel not found", http.StatusNotFound)
+		return
+	}
+
+	// ICE servers
+	iceServers := buildICEServers()
+
+	templates["guest-app.html"].ExecuteTemplate(w, "layout.html", map[string]any{
+		"GuestName":   gs.GuestName,
+		"ChannelID":   ch.ID,
+		"ChannelName": ch.Name,
+		"ICEServers":  iceServers,
+		"CacheBust":   cacheBust,
+	})
+}
+
+func handleCreateGuestInvite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	chID, err := strconv.ParseInt(r.FormValue("channel_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "invalid channel_id", http.StatusBadRequest)
+		return
+	}
+
+	hours, _ := strconv.Atoi(r.FormValue("hours"))
+	if hours <= 0 || hours > 168 { // max 7 days
+		hours = 24
+	}
+
+	user := userFromContext(r)
+
+	token, err := channel.CreateGuestInvite(chID, user.ID, hours)
+	if err != nil {
+		http.Error(w, "Failed to create guest invite", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"token": token,
+		"url":   fmt.Sprintf("/guest/%s", token),
+		"hours": hours,
+	})
 }

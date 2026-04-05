@@ -1,0 +1,39 @@
+{{template "layout.html" .}}
+{{define "content"}}
+<div class="flex items-center justify-center min-h-screen">
+    <div class="w-full max-w-sm p-8 bg-vc-sidebar rounded-2xl border border-vc-border shadow-2xl">
+        <div class="text-center mb-6">
+            <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-vc-accent/20 mb-4">
+                <svg class="w-8 h-8 text-vc-accent" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/>
+                    <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                </svg>
+            </div>
+            <h1 class="text-2xl font-bold">Join as Guest</h1>
+            <p class="text-vc-muted text-sm mt-1">You're invited to <span class="text-vc-accent font-medium">{{.ChannelName}}</span></p>
+        </div>
+
+        {{if .Error}}
+        <div class="mb-4 p-3 bg-vc-red/20 border border-vc-red/30 rounded-lg text-sm text-vc-red fade-in">
+            {{.Error}}
+        </div>
+        {{end}}
+
+        <form method="POST" action="/guest/{{.Token}}" class="space-y-4">
+            <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+            <div>
+                <label class="block text-sm font-medium text-vc-muted mb-1.5">Your name</label>
+                <input type="text" name="guest_name" required autofocus minlength="1" maxlength="30"
+                    class="w-full px-4 py-2.5 bg-vc-bg border border-vc-border rounded-lg text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent focus:ring-1 focus:ring-vc-accent transition"
+                    placeholder="Enter your name">
+            </div>
+            <button type="submit"
+                class="w-full py-2.5 bg-vc-accent hover:bg-vc-accent/80 text-white font-medium rounded-lg transition">
+                Join Channel
+            </button>
+        </form>
+
+        <p class="text-center text-vc-muted text-xs mt-4">This is a temporary guest link</p>
+    </div>
+</div>
+{{end}}

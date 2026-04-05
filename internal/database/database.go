@@ -79,6 +79,21 @@ func migrate() {
 			max_uses INTEGER NOT NULL DEFAULT 0,
 			uses INTEGER NOT NULL DEFAULT 0
 		)`,
+		`CREATE TABLE IF NOT EXISTS guest_invites (
+			token TEXT PRIMARY KEY,
+			channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+			created_by INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS guest_sessions (
+			token TEXT PRIMARY KEY,
+			guest_name TEXT NOT NULL,
+			channel_id INTEGER NOT NULL,
+			invite_token TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL
+		)`,
 	}
 
 	for _, q := range queries {
