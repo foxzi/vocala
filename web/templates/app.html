@@ -137,6 +137,7 @@
 <script>
     window.VOCALA_ICE_SERVERS = {{toJSON .ICEServers}};
     window.VOCALA_AUTO_JOIN = {{toJSON .AutoJoinChannel}};
+    window.VOCALA_IS_ADMIN = {{.User.IsAdmin}};
 </script>
 <script src="/static/js/app.js?v={{.CacheBust}}"></script>
 {{end}}

@@ -70,6 +70,31 @@ function showNotification(text) {
     } catch (e) {}
 }
 
+// --- Local mute (per-user, client-side only) ---
+const localMutedUsers = new Set(JSON.parse(localStorage.getItem('vocala-local-muted') || '[]'));
+
+function toggleLocalMute(userId) {
+    const uid = String(userId);
+    if (localMutedUsers.has(uid)) {
+        localMutedUsers.delete(uid);
+    } else {
+        localMutedUsers.add(uid);
+    }
+    localStorage.setItem('vocala-local-muted', JSON.stringify([...localMutedUsers]));
+    // Apply to audio elements
+    document.querySelectorAll('audio[data-uid]').forEach(el => {
+        if (el.dataset.uid === uid) el.muted = localMutedUsers.has(uid);
+    });
+}
+
+function isLocalMuted(userId) {
+    return localMutedUsers.has(String(userId));
+}
+
+function forceMuteUser(userId) {
+    sendWS({ type: 'force_mute', payload: { user_id: userId } });
+}
+
 // Local pixel-art avatar by username hash
 const AVATAR_COUNT = 50;
 function avatarURL(username) {
@@ -186,6 +211,15 @@ function handleWSMessage(msg) {
             break;
         case 'ice_candidate':
             handleRemoteICECandidate(msg.payload);
+            break;
+        case 'force_muted':
+            // Admin force-muted you
+            if (!isMuted) {
+                isMuted = true;
+                localStorage.setItem('vocala-muted', 'true');
+                if (gainNode) gainNode.gain.value = 0.0;
+                updateMuteUI();
+            }
             break;
         case 'camera_off':
             // Remove remote camera when user turns it off
@@ -492,9 +526,12 @@ function joinChannel(channelID, channelName) {
     });
 }
 
+let lastChannelUsers = [];
+
 function updateMainContent(channelID, users) {
     const container = document.getElementById('channel-view-users');
     if (!container) return;
+    lastChannelUsers = users;
 
     // Clean up camera grid for users who left
     const cameraGrid = document.getElementById('camera-grid');
@@ -548,8 +585,14 @@ function updateMainContent(channelID, users) {
         const existing = existingMap[u.Username];
         if (existing) {
             // Update in place — only change classes/content that differ
+            const lmuted = isLocalMuted(u.ID);
             const border = u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/20' : 'border-vc-border';
-            existing.className = `flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/50 border ${border} transition-all duration-200`;
+            existing.className = `flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/50 border ${border} transition-all duration-200 ${lmuted ? 'opacity-50' : ''}`;
+            const lmuteBtn = existing.querySelector('.local-mute-btn');
+            if (lmuteBtn) {
+                lmuteBtn.textContent = lmuted ? 'Unmute' : 'Mute';
+                lmuteBtn.className = `local-mute-btn text-[10px] px-2 py-0.5 rounded ${lmuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel text-vc-muted hover:text-vc-red hover:bg-vc-red/10'} transition`;
+            }
 
             const avatar = existing.querySelector('.avatar-circle');
             if (avatar) {
@@ -568,9 +611,13 @@ function updateMainContent(channelID, users) {
             if (spacer) spacer.style.display = u.Speaking ? 'none' : '';
         } else {
             // New user — create card with fade-in
+            const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
+            const isSelf = u.Username === selfName;
+            const lmuted = isLocalMuted(u.ID);
             const card = document.createElement('div');
             card.dataset.username = u.Username;
-            card.className = `flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/50 border ${u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/20' : 'border-vc-border'} fade-in transition-all duration-200`;
+            card.dataset.userId = u.ID;
+            card.className = `flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/50 border ${u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/20' : 'border-vc-border'} fade-in transition-all duration-200 ${lmuted ? 'opacity-50' : ''}`;
             card.innerHTML = `
                 <div class="relative">
                     <div class="avatar-circle w-16 h-16 rounded-full ${u.Speaking ? 'ring-4 ring-vc-green/30' : ''} overflow-hidden transition-all">
@@ -579,6 +626,10 @@ function updateMainContent(channelID, users) {
                     <div class="mute-indicator absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-vc-red flex items-center justify-center" style="display:${u.Muted ? '' : 'none'}"><svg class="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg></div>
                 </div>
                 <span class="user-name text-sm font-medium ${u.Muted ? 'text-vc-muted' : 'text-vc-text'}">${escapeHTML(u.Username)}</span>
+                ${!isSelf ? `<div class="flex gap-1">
+                    <button class="local-mute-btn text-[10px] px-2 py-0.5 rounded ${lmuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel text-vc-muted hover:text-vc-red hover:bg-vc-red/10'} transition" onclick="toggleLocalMute(${u.ID}); updateMainContent(currentChannelID, lastChannelUsers);">${lmuted ? 'Unmute' : 'Mute'}</button>
+                    ${window.VOCALA_IS_ADMIN && !u.Muted ? `<button class="text-[10px] px-2 py-0.5 rounded bg-vc-channel text-vc-muted hover:text-vc-yellow hover:bg-vc-yellow/10 transition" onclick="forceMuteUser(${u.ID})" title="Force mute for everyone">Force</button>` : ''}
+                </div>` : ''}
                 <div class="speaking-indicator flex items-center gap-1.5" style="display:${u.Speaking ? '' : 'none'}">
                     <div class="flex gap-0.5"><div class="w-1.5 h-3 bg-vc-green rounded-full animate-pulse"></div><div class="w-1.5 h-5 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.15s"></div><div class="w-1.5 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.3s"></div></div>
                     <span class="text-xs text-vc-green font-medium">Speaking</span>
@@ -739,14 +790,17 @@ async function startWebRTC() {
                 const audio = new Audio();
                 audio.srcObject = event.streams[0];
                 audio.autoplay = true;
-                // Apply selected speaker
                 if (selectedSpkId && audio.setSinkId) {
                     audio.setSinkId(selectedSpkId).catch(() => {});
                 }
-                // Track audio element for per-user volume
+                // Extract userID from stream.id "audio-{userID}"
                 const audioStreamId = event.streams[0]?.id || '';
+                const uid = audioStreamId.replace('audio-', '');
                 audio.dataset.streamId = audioStreamId;
-                document.body.appendChild(audio); // keep reference for volume control
+                audio.dataset.uid = uid;
+                // Apply local mute if user was muted
+                if (localMutedUsers.has(uid)) audio.muted = true;
+                document.body.appendChild(audio);
                 audio.play().catch(() => {});
             } else if (event.track.kind === 'video') {
                 const stream = event.streams[0] || new MediaStream([event.track]);
@@ -844,6 +898,9 @@ async function startWebRTC() {
                     if (selectedSpkId && audio.setSinkId) {
                         audio.setSinkId(selectedSpkId).catch(() => {});
                     }
+                    const uid = (event.streams[0]?.id || '').replace('audio-', '');
+                    audio.dataset.uid = uid;
+                    if (localMutedUsers.has(uid)) audio.muted = true;
                     document.body.appendChild(audio);
                     audio.play().catch(() => {});
                 } else if (event.track.kind === 'video') {

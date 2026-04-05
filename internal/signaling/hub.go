@@ -365,6 +365,26 @@ func handleMessage(c *Client, msg Message) {
 			broadcastChannelUpdate(chID)
 		}
 
+	case "force_mute":
+		// Admin or channel creator can force-mute another user
+		if !c.IsAdmin {
+			return
+		}
+		var p struct {
+			UserID int64 `json:"user_id"`
+		}
+		json.Unmarshal(msg.Payload, &p)
+		channel.SetMuted(p.UserID, true)
+		chID := channel.GetUserChannel(p.UserID)
+		if chID > 0 {
+			// Notify the muted user
+			notif, _ := json.Marshal(map[string]any{
+				"type": "force_muted",
+			})
+			GlobalHub.SendTo(p.UserID, notif)
+			broadcastChannelUpdate(chID)
+		}
+
 	case "speaking":
 		var p struct {
 			Speaking bool `json:"speaking"`
