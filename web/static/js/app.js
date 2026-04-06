@@ -1132,13 +1132,27 @@ function showRemoteVideo(stream, track) {
             <span class="text-vc-muted text-xs">Click to watch</span>
         `;
     }
+    // View mode controls (shown after play)
+    const controls = document.createElement('div');
+    controls.id = 'screen-share-controls';
+    controls.className = 'absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition z-20';
+    controls.innerHTML = `
+        <button onclick="setScreenViewMode('default')" title="Default size" class="ss-mode-btn p-1.5 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 14H4m16-4H4"/></svg>
+        </button>
+        <button onclick="setScreenViewMode('expanded')" title="Fill channel area" class="ss-mode-btn p-1.5 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>
+        </button>
+        <button onclick="setScreenViewMode('fullscreen')" title="Fullscreen" class="ss-mode-btn p-1.5 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM6 14v4h4v2H4v-6h2zm12 4v-4h2v6h-6v-2h4z"/></svg>
+        </button>
+    `;
+
     playOverlay.onclick = () => {
-        // Check element is still in DOM (renegotiation may have replaced it)
         if (!document.contains(video)) return;
         video.classList.remove('hidden');
         playOverlay.remove();
-        videoContainer.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative';
-        // Re-assign stream in case tracks changed during renegotiation
+        videoContainer.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative group';
         if (video.srcObject !== stream) {
             video.srcObject = stream;
         }
@@ -1147,6 +1161,7 @@ function showRemoteVideo(stream, track) {
                 console.error('Screen share video play failed:', err);
             }
         });
+        videoContainer.appendChild(controls);
     };
 
     videoContainer.appendChild(video);
@@ -1157,9 +1172,76 @@ function showRemoteVideo(stream, track) {
     track.onended = () => removeRemoteVideo();
 }
 
+let screenViewMode = 'default';
+
+function setScreenViewMode(mode) {
+    const container = document.getElementById('screen-share-container');
+    const video = document.getElementById('screen-share-video');
+    if (!container || !video) return;
+
+    // Exit fullscreen if leaving fullscreen mode
+    if (screenViewMode === 'fullscreen' && mode !== 'fullscreen') {
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    }
+
+    screenViewMode = mode;
+
+    if (mode === 'default') {
+        container.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative group';
+        container.style.maxHeight = '';
+        container.style.position = '';
+        container.style.inset = '';
+        container.style.zIndex = '';
+        container.style.borderRadius = '';
+        container.style.margin = '';
+        video.className = 'w-full h-full object-contain';
+        video.style.maxHeight = '70vh';
+    } else if (mode === 'expanded') {
+        container.className = 'bg-black overflow-hidden group';
+        container.style.position = 'fixed';
+        container.style.inset = '0';
+        container.style.zIndex = '40';
+        container.style.maxHeight = '';
+        container.style.borderRadius = '0';
+        container.style.margin = '0';
+        video.className = 'w-full h-full object-contain';
+        video.style.maxHeight = '';
+    } else if (mode === 'fullscreen') {
+        container.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative group';
+        container.style.position = '';
+        container.style.inset = '';
+        container.style.zIndex = '';
+        container.style.borderRadius = '';
+        container.style.margin = '';
+        video.className = 'w-full h-full object-contain';
+        video.style.maxHeight = '';
+        if (container.requestFullscreen) {
+            container.requestFullscreen().catch(() => {});
+        }
+    }
+}
+
+// Handle ESC from fullscreen
+document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && screenViewMode === 'fullscreen') {
+        setScreenViewMode('default');
+    }
+});
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && screenViewMode === 'expanded') {
+        setScreenViewMode('default');
+    }
+});
+
 function removeRemoteVideo() {
     const container = document.getElementById('screen-share-container');
-    if (container) container.remove();
+    if (container) {
+        if (document.fullscreenElement === container) {
+            document.exitFullscreen().catch(() => {});
+        }
+        container.remove();
+    }
+    screenViewMode = 'default';
 }
 
 function updateScreenShareUI() {
