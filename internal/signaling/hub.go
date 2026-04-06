@@ -454,6 +454,12 @@ func handleMessage(c *Client, msg Message) {
 		if sfu != nil {
 			sfu.SetExpectCamera(c.UserID, true)
 		}
+		// Notify other clients
+		camOnMsg, _ := json.Marshal(map[string]any{
+			"type":    "camera_on",
+			"user_id": c.UserID,
+		})
+		GlobalHub.BroadcastToChannel(chID, camOnMsg)
 
 	case "camera_off":
 		chID := channel.GetUserChannel(c.UserID)

@@ -221,6 +221,20 @@ function handleWSMessage(msg) {
                 updateMuteUI();
             }
             break;
+        case 'camera_on':
+            // Someone turned on camera — check if we see it after delay
+            setTimeout(() => {
+                const el = document.getElementById('remote-cam-camera-' + msg.user_id);
+                if (!el && peerConnection && peerConnection.signalingState === 'stable') {
+                    console.log('Camera from user', msg.user_id, 'not received, requesting renegotiation');
+                    peerConnection.createOffer().then(offer => {
+                        return peerConnection.setLocalDescription(offer);
+                    }).then(() => {
+                        sendWS({ type: 'webrtc_offer', payload: { sdp: peerConnection.localDescription.sdp } });
+                    }).catch(e => console.error('Renegotiation request failed:', e));
+                }
+            }, 3000);
+            break;
         case 'camera_off':
             // Remove remote camera when user turns it off
             const camEl = document.getElementById('remote-cam-camera-' + msg.user_id);
@@ -1268,6 +1282,10 @@ function setScreenViewMode(mode) {
 
     screenViewMode = mode;
 
+    // Remove close button if exists
+    const oldCloseBtn = container.querySelector('.ss-close-btn');
+    if (oldCloseBtn) oldCloseBtn.remove();
+
     if (mode === 'default') {
         container.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative group';
         container.style.maxHeight = '';
@@ -1286,6 +1304,13 @@ function setScreenViewMode(mode) {
         container.style.maxHeight = '';
         container.style.borderRadius = '0';
         container.style.margin = '0';
+        // Add close button
+        const closeBtn = document.createElement('button');
+        closeBtn.className = 'ss-close-btn absolute top-4 right-4 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
+        closeBtn.title = 'Exit (Esc)';
+        closeBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
+        closeBtn.onclick = () => setScreenViewMode('default');
+        container.appendChild(closeBtn);
         video.className = 'w-full h-full object-contain';
         video.style.maxHeight = '';
     } else if (mode === 'fullscreen') {
@@ -1427,13 +1452,21 @@ function updateGridColumns() {
     const grid = document.getElementById('camera-grid');
     if (!grid) return;
     const count = grid.children.length;
+    let cls;
     if (count <= 1) {
-        grid.className = 'grid grid-cols-1 gap-3 mb-4 w-full max-w-2xl mx-auto';
+        cls = 'grid grid-cols-1 gap-3 mb-4 w-full max-w-2xl mx-auto';
     } else if (count === 2) {
-        grid.className = 'grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 w-full max-w-4xl mx-auto';
+        cls = 'grid grid-cols-1 md:grid-cols-2 gap-3 mb-4 w-full max-w-4xl mx-auto';
+    } else if (count <= 4) {
+        cls = 'grid grid-cols-2 gap-3 mb-4 w-full max-w-5xl mx-auto';
+    } else if (count <= 9) {
+        cls = 'grid grid-cols-2 md:grid-cols-3 gap-2 mb-4 w-full max-w-6xl mx-auto';
+    } else if (count <= 16) {
+        cls = 'grid grid-cols-3 md:grid-cols-4 gap-2 mb-4 w-full mx-auto';
     } else {
-        grid.className = 'grid grid-cols-2 md:grid-cols-3 gap-3 mb-4 w-full max-w-5xl mx-auto';
+        cls = 'grid grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1.5 mb-4 w-full mx-auto';
     }
+    grid.className = cls;
 }
 
 function addLocalCameraToGrid() {
@@ -1443,7 +1476,7 @@ function addLocalCameraToGrid() {
 
     const wrapper = document.createElement('div');
     wrapper.id = 'local-camera';
-    wrapper.className = 'rounded-xl overflow-hidden bg-black border-2 border-vc-accent aspect-video relative';
+    wrapper.className = 'rounded-xl overflow-hidden bg-black border-2 border-vc-accent aspect-video relative group cursor-pointer';
 
     const video = document.createElement('video');
     video.srcObject = cameraStream;
@@ -1454,11 +1487,28 @@ function addLocalCameraToGrid() {
     video.style.transform = 'scaleX(-1)';
 
     const label = document.createElement('div');
-    label.className = 'absolute bottom-2 left-2 bg-black/60 text-white text-xs px-2 py-0.5 rounded';
+    label.className = 'absolute bottom-2 left-2 bg-black/60 text-white text-xs px-2 py-0.5 rounded z-10';
     label.textContent = 'You';
+
+    const localControls = document.createElement('div');
+    localControls.className = 'absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition z-10';
+    localControls.innerHTML = `
+        <button onclick="event.stopPropagation(); setCamViewMode('local-camera', 'expanded')" title="Expand" class="p-1 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>
+        </button>
+        <button onclick="event.stopPropagation(); setCamViewMode('local-camera', 'fullscreen')" title="Fullscreen" class="p-1 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM6 14v4h4v2H4v-6h2zm12 4v-4h2v6h-6v-2h4z"/></svg>
+        </button>
+    `;
+
+    wrapper.onclick = () => {
+        const isExpanded = wrapper.dataset.expanded === 'true';
+        setCamViewMode('local-camera', isExpanded ? 'default' : 'expanded');
+    };
 
     wrapper.appendChild(video);
     wrapper.appendChild(label);
+    wrapper.appendChild(localControls);
     // Local camera always first
     grid.prepend(wrapper);
     updateGridColumns();
@@ -1484,7 +1534,7 @@ function handleRemoteCameraTrack(stream, track, mid) {
 
     const wrapper = document.createElement('div');
     wrapper.id = camId;
-    wrapper.className = 'rounded-xl overflow-hidden bg-black border border-vc-border aspect-video relative';
+    wrapper.className = 'rounded-xl overflow-hidden bg-black border border-vc-border aspect-video relative group cursor-pointer';
 
     const video = document.createElement('video');
     video.srcObject = stream;
@@ -1494,7 +1544,26 @@ function handleRemoteCameraTrack(stream, track, mid) {
     video.className = 'w-full h-full object-cover';
     video.play().catch(() => {});
 
+    // View mode controls (hover)
+    const controls = document.createElement('div');
+    controls.className = 'absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition z-10';
+    controls.innerHTML = `
+        <button onclick="event.stopPropagation(); setCamViewMode('${camId}', 'expanded')" title="Expand" class="p-1 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>
+        </button>
+        <button onclick="event.stopPropagation(); setCamViewMode('${camId}', 'fullscreen')" title="Fullscreen" class="p-1 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM6 14v4h4v2H4v-6h2zm12 4v-4h2v6h-6v-2h4z"/></svg>
+        </button>
+    `;
+
+    // Click on video to toggle expand
+    wrapper.onclick = () => {
+        const isExpanded = wrapper.dataset.expanded === 'true';
+        setCamViewMode(camId, isExpanded ? 'default' : 'expanded');
+    };
+
     wrapper.appendChild(video);
+    wrapper.appendChild(controls);
     grid.appendChild(wrapper);
     updateGridColumns();
 
@@ -1508,6 +1577,84 @@ function handleRemoteCameraTrack(stream, track, mid) {
         if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
     };
 }
+
+let expandedCamId = null;
+
+function setCamViewMode(camId, mode) {
+    const wrapper = document.getElementById(camId);
+    if (!wrapper) return;
+
+    // Reset previous expanded
+    if (expandedCamId && expandedCamId !== camId) {
+        const prev = document.getElementById(expandedCamId);
+        if (prev) {
+            prev.style.position = '';
+            prev.style.inset = '';
+            prev.style.zIndex = '';
+            prev.style.borderRadius = '';
+            prev.style.width = '';
+            prev.style.height = '';
+            prev.dataset.expanded = '';
+            prev.className = prev.className.replace('fixed', '').trim();
+        }
+        expandedCamId = null;
+    }
+
+    if (mode === 'default') {
+        wrapper.style.position = '';
+        wrapper.style.inset = '';
+        wrapper.style.zIndex = '';
+        wrapper.style.borderRadius = '';
+        wrapper.style.width = '';
+        wrapper.style.height = '';
+        wrapper.dataset.expanded = '';
+        expandedCamId = null;
+        const video = wrapper.querySelector('video');
+        if (video) video.className = 'w-full h-full object-cover';
+        const closeBtn = wrapper.querySelector('.cam-close-btn');
+        if (closeBtn) closeBtn.remove();
+    } else if (mode === 'expanded') {
+        wrapper.style.position = 'fixed';
+        wrapper.style.inset = '0';
+        wrapper.style.zIndex = '40';
+        wrapper.style.borderRadius = '0';
+        wrapper.style.width = '100vw';
+        wrapper.style.height = '100vh';
+        wrapper.dataset.expanded = 'true';
+        expandedCamId = camId;
+        const video = wrapper.querySelector('video');
+        if (video) video.className = 'w-full h-full object-contain';
+        // Add close button (always visible)
+        let closeBtn = wrapper.querySelector('.cam-close-btn');
+        if (!closeBtn) {
+            closeBtn = document.createElement('button');
+            closeBtn.className = 'cam-close-btn absolute top-4 right-4 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
+            closeBtn.title = 'Exit (Esc)';
+            closeBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
+            closeBtn.onclick = (e) => { e.stopPropagation(); setCamViewMode(camId, 'default'); };
+            wrapper.appendChild(closeBtn);
+        }
+    } else if (mode === 'fullscreen') {
+        wrapper.dataset.expanded = '';
+        expandedCamId = null;
+        wrapper.style.position = '';
+        wrapper.style.inset = '';
+        wrapper.style.zIndex = '';
+        wrapper.style.borderRadius = '';
+        wrapper.style.width = '';
+        wrapper.style.height = '';
+        if (wrapper.requestFullscreen) {
+            wrapper.requestFullscreen().catch(() => {});
+        }
+    }
+}
+
+// ESC to exit expanded camera
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && expandedCamId) {
+        setCamViewMode(expandedCamId, 'default');
+    }
+});
 
 function removeFromCameraGrid(id) {
     const el = document.getElementById(id);
