@@ -182,6 +182,14 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	GlobalHub.Register(client)
 
+	// Send current presence to new client
+	states := channel.GetAllChannelStates()
+	presenceData, _ := json.Marshal(map[string]any{
+		"type":     "presence",
+		"channels": states,
+	})
+	GlobalHub.SendTo(client.UserID, presenceData)
+
 	go client.writePump()
 	go client.readPump()
 }

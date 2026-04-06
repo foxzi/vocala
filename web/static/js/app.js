@@ -280,12 +280,39 @@ function sendWS(msg) {
 
 // ─── Channel Users UI ─────────────────────────────────────────
 
-// Track users per channel for join/leave sound detection
+// Track users per channel for join/leave sound detection and preview
 const channelUserSets = {};
+const channelUsersData = {}; // channelID -> [{Username, ID, Muted, Speaking}, ...]
 
 function updateChannelUsers(channelID, users) {
     const container = document.getElementById(`ch-users-${channelID}`);
     const countEl = document.getElementById(`ch-count-${channelID}`);
+
+    // Store for preview
+    channelUsersData[channelID] = users;
+
+    // Update preview if currently previewing this channel
+    if (previewChannelID === channelID && currentChannelID !== channelID) {
+        const previewUsers = document.getElementById('preview-users');
+        if (previewUsers) {
+            if (users.length > 0) {
+                previewUsers.innerHTML = `
+                    <div class="text-sm text-vc-muted mb-2">${users.length} user${users.length > 1 ? 's' : ''} in channel:</div>
+                    <div class="flex flex-wrap justify-center gap-3 mb-4">
+                        ${users.map(u => `
+                            <div class="flex items-center gap-2 px-3 py-1.5 bg-vc-channel rounded-lg">
+                                <img src="${avatarURL(u.Username)}" class="w-6 h-6 rounded-full">
+                                <span class="text-sm text-vc-text">${escapeHTML(u.Username)}</span>
+                                ${u.Muted ? '<svg class="w-3 h-3 text-vc-red" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : ''}
+                                ${u.Speaking ? '<div class="flex gap-0.5"><div class="w-1 h-2 bg-vc-green rounded-full animate-pulse"></div><div class="w-1 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.1s"></div></div>' : ''}
+                            </div>
+                        `).join('')}
+                    </div>`;
+            } else {
+                previewUsers.innerHTML = '<div class="text-sm text-vc-muted mb-4">No one in this channel</div>';
+            }
+        }
+    }
 
     // Detect join/leave in current channel for sounds + notifications
     if (channelID === currentChannelID) {
@@ -390,7 +417,62 @@ function closeSidebarOnMobile() {
     }
 }
 
-// ─── Channel Join/Leave ───────────────────────────────────────
+// ─── Channel Preview & Join ───────────────────────────────────
+
+let previewChannelID = null;
+
+function previewChannel(channelID, channelName, isPrivate) {
+    // If already in this channel, do nothing
+    if (currentChannelID === channelID) return;
+
+    previewChannelID = channelID;
+
+    // Highlight in sidebar
+    document.querySelectorAll('.channel-item').forEach(el => {
+        el.classList.toggle('bg-vc-hover/50', +el.dataset.channelId === channelID);
+    });
+
+    const users = channelUsersData[channelID] || [];
+
+    const mainContent = document.getElementById('main-content');
+    mainContent.innerHTML = `
+        <div class="flex flex-col items-center justify-center h-full gap-6 p-6">
+            <div class="w-20 h-20 rounded-2xl bg-vc-channel flex items-center justify-center">
+                ${isPrivate
+                    ? '<svg class="w-10 h-10 text-vc-yellow" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>'
+                    : '<svg class="w-10 h-10 text-vc-accent" fill="currentColor" viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>'
+                }
+            </div>
+            <div class="text-center">
+                <h2 class="text-xl font-bold">${escapeHTML(channelName)}</h2>
+                ${isPrivate ? '<span class="text-xs text-vc-yellow">Private channel</span>' : ''}
+            </div>
+            <div id="preview-users" class="text-center">
+                ${users.length > 0
+                    ? `<div class="text-sm text-vc-muted mb-2">${users.length} user${users.length > 1 ? 's' : ''} in channel:</div>
+                       <div class="flex flex-wrap justify-center gap-3 mb-4">
+                           ${users.map(u => `
+                               <div class="flex items-center gap-2 px-3 py-1.5 bg-vc-channel rounded-lg">
+                                   <img src="${avatarURL(u.Username)}" class="w-6 h-6 rounded-full">
+                                   <span class="text-sm text-vc-text">${escapeHTML(u.Username)}</span>
+                                   ${u.Muted ? '<svg class="w-3 h-3 text-vc-red" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : ''}
+                                   ${u.Speaking ? '<div class="flex gap-0.5"><div class="w-1 h-2 bg-vc-green rounded-full animate-pulse"></div><div class="w-1 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.1s"></div></div>' : ''}
+                               </div>
+                           `).join('')}
+                       </div>`
+                    : '<div class="text-sm text-vc-muted mb-4">No one in this channel</div>'
+                }
+            </div>
+            <button data-action="join-channel" data-ch-id="${channelID}" data-ch-name="${escapeHTML(channelName)}"
+                class="px-6 py-2.5 bg-vc-accent hover:bg-vc-accent/80 text-white font-medium rounded-lg transition flex items-center gap-2">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/>
+                </svg>
+                Join Channel
+            </button>
+        </div>
+    `;
+}
 
 function joinChannel(channelID, channelName) {
     if (currentChannelID === channelID) return;
@@ -1726,6 +1808,7 @@ document.addEventListener('click', function(e) {
     const chName = btn.dataset.chName;
     if (action === 'manage-members') openMemberManager(chId, chName);
     if (action === 'delete-channel') deleteChannel(chId, chName);
+    if (action === 'join-channel') joinChannel(chId, chName);
 });
 
 // Set self avatar

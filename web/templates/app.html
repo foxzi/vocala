@@ -146,7 +146,7 @@
 {{range .Channels}}
 <div class="channel-item mb-1 fade-in" data-channel-id="{{.ID}}" data-private="{{.IsPrivate}}">
     <div class="flex items-center group">
-        <button data-ch-id="{{.ID}}" data-ch-name="{{.Name}}" data-private="{{.IsPrivate}}" onclick="joinChannel(+this.dataset.chId, this.dataset.chName)"
+        <button data-ch-id="{{.ID}}" data-ch-name="{{.Name}}" data-private="{{.IsPrivate}}" onclick="previewChannel(+this.dataset.chId, this.dataset.chName, this.dataset.private==='true')"
             class="flex-1 flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-vc-hover transition text-left">
             <div class="flex-shrink-0 w-8 h-8 rounded-lg bg-vc-channel flex items-center justify-center group-hover:bg-vc-accent/20 transition">
                 {{if .IsPrivate}}
