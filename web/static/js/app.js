@@ -181,6 +181,7 @@ function connectWS() {
     };
 
     ws.onclose = (e) => {
+        console.warn('WS closed: code=' + e.code + ' reason=' + (e.reason || '(none)') + ' wasClean=' + e.wasClean);
         setConnectionStatus('reconnecting');
         const dbg = document.getElementById('guest-debug');
         if (dbg) dbg.textContent = 'WS closed: code=' + e.code + ' reason=' + e.reason;
@@ -190,6 +191,7 @@ function connectWS() {
     };
 
     ws.onerror = (e) => {
+        console.error('WS error', e);
         const dbg = document.getElementById('guest-debug');
         if (dbg) dbg.textContent = 'WS error';
         ws.close();
