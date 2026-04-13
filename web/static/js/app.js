@@ -958,14 +958,8 @@ async function startWebRTC() {
                     const mid = event.transceiver ? event.transceiver.mid : null;
                     handleRemoteCameraTrack(stream, event.track, mid);
                 } else {
-                    // Screen share
-                    const existingVideo = document.getElementById('screen-share-video');
-                    if (existingVideo) {
-                        existingVideo.srcObject = stream;
-                        existingVideo.play().catch(() => {});
-                    } else {
-                        showRemoteVideo(stream, event.track);
-                    }
+                    // Screen share — showRemoteVideo handles dedup by stream.id
+                    showRemoteVideo(stream, event.track);
                 }
             }
         };
@@ -1293,129 +1287,96 @@ async function stopScreenShare() {
     updateScreenShareUI();
 }
 
-function showLocalScreenPreview(stream) {
-    removeLocalScreenPreview();
+// Add a screen-share tile to the camera grid. Shared by local and remote
+// screen shares so they scale together with camera tiles. Screen tiles use
+// col-span-2 to appear roughly twice as wide as camera tiles (more real estate
+// for content) while still being part of the same responsive grid.
+function addScreenTileToGrid({ id, stream, label, track }) {
+    ensureCameraGrid();
+    const grid = document.getElementById('camera-grid');
+    if (!grid) return;
 
-    const container = document.getElementById('channel-view-users');
-    if (!container) return;
-
-    const previewContainer = document.createElement('div');
-    previewContainer.id = 'local-screen-preview';
-    previewContainer.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative';
-    previewContainer.style.maxHeight = '70vh';
-
-    const label = document.createElement('div');
-    label.className = 'absolute top-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded';
-    label.textContent = 'Your screen';
-
-    const video = document.createElement('video');
-    video.srcObject = stream;
-    video.autoplay = true;
-    video.playsInline = true;
-    video.muted = true;
-    video.className = 'w-full h-full object-contain';
-    video.style.maxHeight = '70vh';
-
-    previewContainer.appendChild(video);
-    previewContainer.appendChild(label);
-    container.parentElement.insertBefore(previewContainer, container);
-    video.play().catch(() => {});
-}
-
-function removeLocalScreenPreview() {
-    const el = document.getElementById('local-screen-preview');
-    if (el) el.remove();
-}
-
-function showRemoteVideo(stream, track) {
-    // Remove any existing video container first
-    removeRemoteVideo();
-
-    const container = document.getElementById('channel-view-users');
-    if (!container) return;
-
-    const videoContainer = document.createElement('div');
-    videoContainer.id = 'screen-share-container';
-    videoContainer.className = 'w-full bg-vc-sidebar rounded-xl overflow-hidden mb-4 relative';
-    videoContainer.style.maxHeight = '70vh';
-
-    const video = document.createElement('video');
-    video.id = 'screen-share-video';
-    video.srcObject = stream;
-    video.playsInline = true;
-    video.autoplay = true;
-    video.muted = true;
-    video.className = 'w-full h-full object-contain hidden';
-    video.style.maxHeight = '70vh';
-
-    // Play button overlay
-    const playOverlay = document.createElement('div');
-    playOverlay.id = 'screen-share-play-overlay';
-    if (latestScreenPreview) {
-        playOverlay.className = 'relative overflow-hidden cursor-pointer';
-        playOverlay.style.minHeight = '300px';
-        playOverlay.innerHTML = `
-            <div class="preview-bg absolute inset-0" style="background-image:url(${latestScreenPreview});background-size:cover;background-position:center;filter:blur(8px);transform:scale(1.1)"></div>
-            <div class="relative flex flex-col items-center justify-center gap-3 py-12 z-10">
-                <div class="w-16 h-16 rounded-full bg-vc-accent flex items-center justify-center hover:bg-vc-accent/80 transition">
-                    <svg class="w-8 h-8 text-white ml-1" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M8 5v14l11-7z"/>
-                    </svg>
-                </div>
-                <span class="text-vc-text text-sm font-medium">${screenShareUsername ? escapeHTML(screenShareUsername) + ' is sharing their screen' : 'Someone is sharing their screen'}</span>
-                <span class="text-vc-muted text-xs">Click to watch</span>
-            </div>
-        `;
-    } else {
-        playOverlay.className = 'flex flex-col items-center justify-center gap-3 py-12 cursor-pointer';
-        playOverlay.innerHTML = `
-            <div class="w-16 h-16 rounded-full bg-vc-accent flex items-center justify-center hover:bg-vc-accent/80 transition">
-                <svg class="w-8 h-8 text-white ml-1" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M8 5v14l11-7z"/>
-                </svg>
-            </div>
-            <span class="text-vc-text text-sm font-medium">${screenShareUsername ? escapeHTML(screenShareUsername) + ' is sharing their screen' : 'Someone is sharing their screen'}</span>
-            <span class="text-vc-muted text-xs">Click to watch</span>
-        `;
+    // Replace existing tile if same id (e.g. on renegotiation)
+    const existing = document.getElementById(id);
+    if (existing) {
+        const v = existing.querySelector('video');
+        if (v) {
+            v.srcObject = stream;
+            v.play().catch(() => {});
+        }
+        return;
     }
-    // View mode controls (shown after play)
+
+    const wrapper = document.createElement('div');
+    wrapper.id = id;
+    wrapper.className = 'rounded-xl overflow-hidden bg-black border-2 border-vc-accent aspect-video relative group cursor-pointer col-span-2';
+    wrapper.dataset.tileType = 'screen';
+
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.autoplay = true;
+    video.playsInline = true;
+    video.muted = true;
+    // object-contain (not cover) so the full shared screen is visible
+    video.className = 'w-full h-full object-contain';
+    video.play().catch(() => {});
+
+    const labelEl = document.createElement('div');
+    labelEl.className = 'absolute bottom-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded z-10';
+    labelEl.textContent = label;
+
     const controls = document.createElement('div');
-    controls.id = 'screen-share-controls';
-    controls.className = 'absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition z-20';
+    controls.className = 'absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition z-10';
     controls.innerHTML = `
-        <button onclick="setScreenViewMode('default')" title="Default size" class="ss-mode-btn p-1.5 rounded bg-black/60 text-white hover:bg-white/20 transition">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 14H4m16-4H4"/></svg>
+        <button onclick="event.stopPropagation(); setCamViewMode('${id}', 'expanded')" title="Expand" class="p-1 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>
         </button>
-        <button onclick="setScreenViewMode('expanded')" title="Fill channel area" class="ss-mode-btn p-1.5 rounded bg-black/60 text-white hover:bg-white/20 transition">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>
-        </button>
-        <button onclick="setScreenViewMode('fullscreen')" title="Fullscreen" class="ss-mode-btn p-1.5 rounded bg-black/60 text-white hover:bg-white/20 transition">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM6 14v4h4v2H4v-6h2zm12 4v-4h2v6h-6v-2h4z"/></svg>
+        <button onclick="event.stopPropagation(); setCamViewMode('${id}', 'fullscreen')" title="Fullscreen" class="p-1 rounded bg-black/60 text-white hover:bg-white/20 transition">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4h6v2H6v4H4V4zm10 0h6v6h-2V6h-4V4zM6 14v4h4v2H4v-6h2zm12 4v-4h2v6h-6v-2h4z"/></svg>
         </button>
     `;
 
-    playOverlay.onclick = () => {
-        if (!document.contains(video)) return;
-        video.classList.remove('hidden');
-        playOverlay.remove();
-        videoContainer.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative group';
-        if (video.srcObject !== stream) {
-            video.srcObject = stream;
-        }
-        video.play().catch(err => {
-            if (err.name !== 'AbortError') {
-                console.error('Screen share video play failed:', err);
-            }
-        });
-        videoContainer.appendChild(controls);
+    wrapper.onclick = () => {
+        const isExpanded = wrapper.dataset.expanded === 'true';
+        setCamViewMode(id, isExpanded ? 'default' : 'expanded');
     };
 
-    videoContainer.appendChild(video);
-    videoContainer.appendChild(playOverlay);
-    container.parentElement.insertBefore(videoContainer, container);
+    wrapper.appendChild(video);
+    wrapper.appendChild(labelEl);
+    wrapper.appendChild(controls);
+    // Screen tiles always at the top of the grid
+    grid.prepend(wrapper);
+    updateGridColumns();
 
-    // Clean up when track ends
-    track.onended = () => removeRemoteVideo();
+    if (track) {
+        track.onended = () => removeScreenTileFromGrid(id);
+    }
+}
+
+function removeScreenTileFromGrid(id) {
+    const el = document.getElementById(id);
+    if (el) {
+        if (document.fullscreenElement === el) document.exitFullscreen().catch(() => {});
+        el.remove();
+        updateGridColumns();
+    }
+}
+
+function showLocalScreenPreview(stream) {
+    addScreenTileToGrid({ id: 'local-screen-share', stream, label: 'Your screen' });
+}
+
+function removeLocalScreenPreview() {
+    removeScreenTileFromGrid('local-screen-share');
+}
+
+function showRemoteVideo(stream, track) {
+    // Remote screen shares are rendered as grid tiles alongside cameras.
+    // Using stream.id (stable from SFU: "screen-<userID>") as the tile id
+    // ensures renegotiations replace the tile in place rather than duplicating.
+    const id = 'remote-screen-share-' + stream.id;
+    const label = screenShareUsername ? escapeHTML(screenShareUsername) + ' — screen' : 'Screen share';
+    addScreenTileToGrid({ id, stream, label, track });
 }
 
 let screenViewMode = 'default';
@@ -1491,14 +1452,14 @@ document.addEventListener('keydown', (e) => {
 });
 
 function removeRemoteVideo() {
-    const container = document.getElementById('screen-share-container');
-    if (container) {
-        if (document.fullscreenElement === container) {
-            document.exitFullscreen().catch(() => {});
-        }
-        container.remove();
-    }
-    screenViewMode = 'default';
+    // Remove all remote-screen-share tiles from the grid.
+    const grid = document.getElementById('camera-grid');
+    if (!grid) return;
+    grid.querySelectorAll('[id^="remote-screen-share-"]').forEach(el => {
+        if (document.fullscreenElement === el) document.exitFullscreen().catch(() => {});
+        el.remove();
+    });
+    updateGridColumns();
 }
 
 function updateScreenShareUI() {
@@ -1820,51 +1781,14 @@ function removeFromCameraGrid(id) {
 }
 
 function showScreenPreviewPlaceholder() {
-    if (!latestScreenPreview) return;
-    if (document.getElementById('screen-share-container')) return;
-
-    const container = document.getElementById('channel-view-users');
-    if (!container) return;
-
-    const videoContainer = document.createElement('div');
-    videoContainer.id = 'screen-share-container';
-    videoContainer.className = 'w-full bg-vc-sidebar rounded-xl overflow-hidden mb-4 relative';
-    videoContainer.style.maxHeight = '70vh';
-
-    const playOverlay = document.createElement('div');
-    playOverlay.id = 'screen-share-play-overlay';
-    playOverlay.className = 'relative overflow-hidden cursor-pointer';
-    playOverlay.style.minHeight = '300px';
-    playOverlay.innerHTML = `
-        <div class="preview-bg absolute inset-0" style="background-image:url(${latestScreenPreview});background-size:cover;background-position:center;filter:blur(8px);transform:scale(1.1)"></div>
-        <div class="relative flex flex-col items-center justify-center gap-3 py-12 z-10">
-            <div class="w-16 h-16 rounded-full bg-vc-accent flex items-center justify-center hover:bg-vc-accent/80 transition">
-                <svg class="w-8 h-8 text-white ml-1" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M8 5v14l11-7z"/>
-                </svg>
-            </div>
-            <span class="text-vc-text text-sm font-medium">${screenShareUsername ? escapeHTML(screenShareUsername) + ' is sharing their screen' : 'Someone is sharing their screen'}</span>
-            <span class="text-vc-muted text-xs">Click to watch</span>
-        </div>
-    `;
-    playOverlay.onclick = () => {
-        // When clicked, the actual WebRTC video should be available
-        // Request a renegotiation or just wait for the video track
-        playOverlay.innerHTML = `
-            <div class="flex flex-col items-center justify-center gap-3 py-12">
-                <div class="w-8 h-8 border-2 border-vc-accent border-t-transparent rounded-full animate-spin"></div>
-                <span class="text-vc-muted text-xs">Connecting to screen share...</span>
-            </div>
-        `;
-    };
-
-    videoContainer.appendChild(playOverlay);
-    container.parentElement.insertBefore(videoContainer, container);
+    // No-op: remote screen shares are now rendered as tiles in camera-grid
+    // via showRemoteVideo() as soon as the video track arrives. The standalone
+    // preview placeholder is obsolete in the unified-grid layout.
 }
 
 function captureAndSendPreview() {
     if (!screenStream) return;
-    const video = document.querySelector('#local-screen-preview video');
+    const video = document.querySelector('#local-screen-share video');
     if (!video || !video.videoWidth) return;
     const canvas = document.createElement('canvas');
     canvas.width = 320;
@@ -1876,26 +1800,7 @@ function captureAndSendPreview() {
 }
 
 function updateScreenPreviewOverlay() {
-    const overlay = document.getElementById('screen-share-play-overlay');
-    if (!overlay || !latestScreenPreview) return;
-    // Ensure the overlay has the blurred background structure
-    let bgDiv = overlay.querySelector('.preview-bg');
-    if (!bgDiv) {
-        // Restructure: wrap existing content, add blurred bg
-        overlay.className = 'relative overflow-hidden cursor-pointer';
-        overlay.style.minHeight = '300px';
-        const existingContent = overlay.innerHTML;
-        overlay.innerHTML = '';
-        bgDiv = document.createElement('div');
-        bgDiv.className = 'preview-bg absolute inset-0';
-        bgDiv.style.cssText = 'background-size:cover;background-position:center;filter:blur(8px);transform:scale(1.1)';
-        overlay.appendChild(bgDiv);
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'relative flex flex-col items-center justify-center gap-3 py-12 z-10';
-        contentDiv.innerHTML = existingContent;
-        overlay.appendChild(contentDiv);
-    }
-    bgDiv.style.backgroundImage = `url(${latestScreenPreview})`;
+    // No-op (see showScreenPreviewPlaceholder).
 }
 
 function cleanupWebRTC() {
