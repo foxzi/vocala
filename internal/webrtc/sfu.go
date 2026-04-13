@@ -197,7 +197,20 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 		// and accept ours, ending the deadlock. After the exchange, the
 		// client's onnegotiationneeded fires again and its offer is re-sent.
 		if existingPeer.PC.SignalingState() == webrtc.SignalingStateHaveLocalOffer {
-			logger.Warn("webrtc: glare on user %d offer — dropping, waiting for client rollback", userID)
+			logger.Warn("webrtc: glare on user %d offer — dropping, re-sending server offer", userID)
+			// We can't rollback (pion v4 public API doesn't allow it), so we
+			// drop the client offer. The client MUST receive a server offer
+			// to know to rollback. If our original server offer got lost or
+			// was ignored, re-push it now so the client can rollback and
+			// accept it. After that exchange, the client's
+			// onnegotiationneeded fires again and re-sends the offer.
+			if pending := existingPeer.PC.PendingLocalDescription(); pending != nil && pending.Type == webrtc.SDPTypeOffer {
+				data, _ := json.Marshal(map[string]any{
+					"type":    "webrtc_offer",
+					"payload": map[string]any{"sdp": pending.SDP},
+				})
+				s.SendMessage(userID, data)
+			}
 			return nil
 		}
 		if err := existingPeer.PC.SetRemoteDescription(offer); err != nil {
