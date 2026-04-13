@@ -126,6 +126,7 @@ let currentVadLevel = 0;
 // Screen share state
 let screenStream = null;
 let screenSender = null;
+let screenAdaptiveCleanup = null;
 let isScreenSharing = false;
 let screenPreviewInterval = null;
 let latestScreenPreview = null;
@@ -134,7 +135,13 @@ let screenShareUsername = null;
 // Camera state
 let cameraStream = null;
 let cameraSender = null;
+let cameraAdaptiveCleanup = null;
 let isCameraOn = localStorage.getItem('vocala-camera') === 'true';
+
+// Adaptive publisher bitrate tiers (bps). Start at tier 0, step down on
+// qualityLimitationReason==='bandwidth', step up after 15s clean.
+const CAMERA_BITRATE_TIERS_BPS = [1_200_000, 800_000, 500_000, 300_000, 150_000];
+const SCREEN_BITRATE_TIERS_BPS = [2_500_000, 1_500_000, 800_000, 400_000];
 let remoteCameras = {}; // userID -> { stream, username }
 let lastServerOfferTime = 0;
 
@@ -1149,6 +1156,62 @@ function handleRemoteICECandidate(payload) {
         .catch(err => console.error('Failed to add ICE candidate:', err));
 }
 
+// Adaptive publisher bitrate: monitors outbound-rtp stats and adjusts
+// encoding maxBitrate in response to qualityLimitationReason. Returns a
+// cleanup fn that stops the monitor. Logs transitions to the console.
+function startAdaptiveBitrate(sender, tiers, label) {
+    let tierIdx = 0;
+    let lastGoodAt = Date.now();
+    let stopped = false;
+
+    const applyTier = async (idx) => {
+        try {
+            const params = sender.getParameters();
+            if (!params.encodings || params.encodings.length === 0) {
+                params.encodings = [{}];
+            }
+            params.encodings[0].maxBitrate = tiers[idx];
+            await sender.setParameters(params);
+            console.log('adaptive[' + label + ']: cap=' + Math.round(tiers[idx] / 1000) + ' kbps (tier ' + idx + ')');
+        } catch (e) {
+            // Sender may not be fully bound yet — just skip this tick.
+        }
+    };
+
+    // Apply initial cap shortly after attach so the transport is ready.
+    setTimeout(() => { if (!stopped) applyTier(0); }, 500);
+
+    const interval = setInterval(async () => {
+        if (stopped || !sender.track || sender.track.readyState !== 'live') return;
+        let bwLimited = false;
+        try {
+            const stats = await sender.getStats();
+            stats.forEach(s => {
+                if (s.type === 'outbound-rtp' && s.kind === 'video' &&
+                    s.qualityLimitationReason === 'bandwidth') {
+                    bwLimited = true;
+                }
+            });
+        } catch (e) {
+            return;
+        }
+        const now = Date.now();
+        if (bwLimited) {
+            if (tierIdx < tiers.length - 1) {
+                tierIdx++;
+                await applyTier(tierIdx);
+            }
+            lastGoodAt = now;
+        } else if (tierIdx > 0 && now - lastGoodAt > 15000) {
+            tierIdx--;
+            await applyTier(tierIdx);
+            lastGoodAt = now;
+        }
+    }, 3000);
+
+    return () => { stopped = true; clearInterval(interval); };
+}
+
 async function startScreenShare() {
     if (!peerConnection || isScreenSharing) return;
 
@@ -1160,6 +1223,7 @@ async function startScreenShare() {
 
         const videoTrack = screenStream.getVideoTracks()[0];
         screenSender = peerConnection.addTrack(videoTrack, screenStream);
+        screenAdaptiveCleanup = startAdaptiveBitrate(screenSender, SCREEN_BITRATE_TIERS_BPS, 'screen');
         isScreenSharing = true;
 
         // When user stops sharing via browser UI
@@ -1186,6 +1250,7 @@ async function stopScreenShare() {
     clearInterval(screenPreviewInterval);
     screenPreviewInterval = null;
 
+    if (screenAdaptiveCleanup) { screenAdaptiveCleanup(); screenAdaptiveCleanup = null; }
     if (screenSender && peerConnection) {
         peerConnection.removeTrack(screenSender);
     }
@@ -1456,6 +1521,7 @@ async function startCamera() {
         // SFU will initiate renegotiation — do NOT create offer from client
         sendWS({ type: 'camera_on' });
         cameraSender = peerConnection.addTrack(videoTrack, cameraStream);
+        cameraAdaptiveCleanup = startAdaptiveBitrate(cameraSender, CAMERA_BITRATE_TIERS_BPS, 'camera');
 
         isCameraOn = true;
         updateCameraUI();
@@ -1470,6 +1536,7 @@ async function startCamera() {
 }
 
 function stopCamera() {
+    if (cameraAdaptiveCleanup) { cameraAdaptiveCleanup(); cameraAdaptiveCleanup = null; }
     if (cameraStream) {
         cameraStream.getTracks().forEach(t => t.stop());
         cameraStream = null;
@@ -1819,6 +1886,7 @@ function cleanupWebRTC() {
         audioContext = null;
         analyser = null;
     }
+    if (screenAdaptiveCleanup) { screenAdaptiveCleanup(); screenAdaptiveCleanup = null; }
     if (screenStream) {
         screenStream.getTracks().forEach(t => t.stop());
         screenStream = null;
@@ -1828,6 +1896,7 @@ function cleanupWebRTC() {
     removeRemoteVideo();
     removeLocalScreenPreview();
     // Cleanup camera
+    if (cameraAdaptiveCleanup) { cameraAdaptiveCleanup(); cameraAdaptiveCleanup = null; }
     if (cameraStream) {
         cameraStream.getTracks().forEach(t => t.stop());
         cameraStream = null;
