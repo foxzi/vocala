@@ -249,6 +249,8 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 			// explicit hints the client sent over WS (camera_on / screen_on)
 			// immediately before the renegotiation. Prefer screen over camera
 			// when both flags are set — screen is the newer intent.
+			logger.Info("webrtc: classify video user %d: expectScreen=%v expectCamera=%v cameraTrack=%v screenTrack=%v",
+				userID, peer.expectScreen, peer.expectCamera, peer.cameraTrack != nil, peer.screenTrack != nil)
 			if peer.expectScreen && peer.screenTrack == nil {
 				peer.expectScreen = false
 				s.handleScreenTrack(peer, userID, username, track)
@@ -260,8 +262,10 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 				// Default: fill whichever slot is empty — camera first since
 				// that's the more common case.
 				if peer.cameraTrack == nil {
+					logger.Warn("webrtc: user %d video track with no hint — defaulting to camera (fallback)", userID)
 					s.handleCameraTrack(peer, userID, username, track)
 				} else {
+					logger.Warn("webrtc: user %d video track with no hint — defaulting to screen (fallback)", userID)
 					s.handleScreenTrack(peer, userID, username, track)
 				}
 			}

@@ -465,6 +465,7 @@ func handleMessage(c *Client, msg Message) {
 		sfu := rtc.GetSFU(chID)
 		if sfu != nil {
 			sfu.SetExpectCamera(c.UserID, true)
+			logger.Info("signaling: user %d expectCamera=true", c.UserID)
 		}
 		// Notify other clients
 		camOnMsg, _ := json.Marshal(map[string]any{
@@ -481,6 +482,7 @@ func handleMessage(c *Client, msg Message) {
 		sfu := rtc.GetSFU(chID)
 		if sfu != nil {
 			sfu.SetExpectCamera(c.UserID, false)
+			logger.Info("signaling: user %d expectCamera=false", c.UserID)
 		}
 		// Notify other clients to remove camera
 		msg, _ := json.Marshal(map[string]any{
@@ -497,6 +499,7 @@ func handleMessage(c *Client, msg Message) {
 		sfu := rtc.GetSFU(chID)
 		if sfu != nil {
 			sfu.SetExpectScreen(c.UserID, true)
+			logger.Info("signaling: user %d expectScreen=true", c.UserID)
 		}
 
 	case "screen_off":
@@ -507,6 +510,7 @@ func handleMessage(c *Client, msg Message) {
 		sfu := rtc.GetSFU(chID)
 		if sfu != nil {
 			sfu.SetExpectScreen(c.UserID, false)
+			logger.Info("signaling: user %d expectScreen=false", c.UserID)
 		}
 
 	case "ws_media_mode":
