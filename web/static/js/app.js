@@ -1110,11 +1110,32 @@ function updateMuteUI() {
     }
 }
 
-function handleWebRTCAnswer(payload) {
+// ICE candidates from the server can arrive before we've processed the
+// server's SDP answer (pion's OnICECandidate fires inside SetLocalDescription,
+// so candidates can be enqueued on the WS before the answer message). We
+// buffer them here and flush once a remoteDescription is set.
+let pendingIceCandidates = [];
+
+function flushPendingIce() {
+    if (!peerConnection) { pendingIceCandidates = []; return; }
+    const pending = pendingIceCandidates;
+    pendingIceCandidates = [];
+    for (const c of pending) {
+        peerConnection.addIceCandidate(new RTCIceCandidate(c))
+            .catch(err => console.warn('Flushed ICE candidate failed:', err));
+    }
+}
+
+async function handleWebRTCAnswer(payload) {
     if (!peerConnection) return;
-    peerConnection.setRemoteDescription(
-        new RTCSessionDescription({ type: 'answer', sdp: payload.sdp })
-    ).catch(err => console.error('Failed to set remote description:', err));
+    try {
+        await peerConnection.setRemoteDescription(
+            new RTCSessionDescription({ type: 'answer', sdp: payload.sdp })
+        );
+        flushPendingIce();
+    } catch (err) {
+        console.error('Failed to set remote description:', err);
+    }
 }
 
 async function handleWebRTCOffer(payload) {
@@ -1137,6 +1158,7 @@ async function handleWebRTCOffer(payload) {
         await peerConnection.setRemoteDescription(
             new RTCSessionDescription({ type: 'offer', sdp: payload.sdp })
         );
+        flushPendingIce();
 
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
@@ -1152,6 +1174,11 @@ async function handleWebRTCOffer(payload) {
 
 function handleRemoteICECandidate(payload) {
     if (!peerConnection) return;
+    // If remoteDescription isn't set yet, buffer the candidate.
+    if (!peerConnection.remoteDescription) {
+        pendingIceCandidates.push(payload.candidate);
+        return;
+    }
     peerConnection.addIceCandidate(new RTCIceCandidate(payload.candidate))
         .catch(err => console.error('Failed to add ICE candidate:', err));
 }
@@ -1872,7 +1899,9 @@ function updateScreenPreviewOverlay() {
 }
 
 function cleanupWebRTC() {
-    console.log('cleanupWebRTC: stopping all media');
+    const caller = (new Error().stack || '').split('\n')[2] || '?';
+    console.log('cleanupWebRTC: stopping all media (called from ' + caller.trim() + ')');
+    pendingIceCandidates = [];
     clearInterval(screenPreviewInterval);
     screenPreviewInterval = null;
     latestScreenPreview = null;
