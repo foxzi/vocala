@@ -27,6 +27,7 @@ type Peer struct {
 	screenTrack  *webrtc.TrackRemote
 	cameraTrack  *webrtc.TrackRemote
 	expectCamera bool // set via WS before renegotiation
+	expectScreen bool // set via WS before renegotiation
 	// Outgoing local tracks forwarded to this peer (from other peers)
 	outputTracks       map[int64]*webrtc.TrackLocalStaticRTP // audio
 	screenOutputTracks map[int64]*webrtc.TrackLocalStaticRTP // screen
@@ -244,11 +245,25 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 		case webrtc.RTPCodecTypeAudio:
 			s.handleAudioTrack(peer, userID, username, track)
 		case webrtc.RTPCodecTypeVideo:
-			if peer.expectCamera && peer.cameraTrack == nil {
+			// Classify incoming video track as camera or screen based on
+			// explicit hints the client sent over WS (camera_on / screen_on)
+			// immediately before the renegotiation. Prefer screen over camera
+			// when both flags are set — screen is the newer intent.
+			if peer.expectScreen && peer.screenTrack == nil {
+				peer.expectScreen = false
+				s.handleScreenTrack(peer, userID, username, track)
+			} else if peer.expectCamera && peer.cameraTrack == nil {
 				peer.expectCamera = false
 				s.handleCameraTrack(peer, userID, username, track)
 			} else {
-				s.handleScreenTrack(peer, userID, username, track)
+				// No explicit hint (older client, or flag already consumed).
+				// Default: fill whichever slot is empty — camera first since
+				// that's the more common case.
+				if peer.cameraTrack == nil {
+					s.handleCameraTrack(peer, userID, username, track)
+				} else {
+					s.handleScreenTrack(peer, userID, username, track)
+				}
 			}
 		}
 	})
@@ -372,6 +387,16 @@ func (s *SFU) SetExpectCamera(userID int64, expect bool) {
 	s.mu.RUnlock()
 	if ok {
 		peer.expectCamera = expect
+	}
+}
+
+// SetExpectScreen marks the next video track from this user as a screen track.
+func (s *SFU) SetExpectScreen(userID int64, expect bool) {
+	s.mu.RLock()
+	peer, ok := s.peers[userID]
+	s.mu.RUnlock()
+	if ok {
+		peer.expectScreen = expect
 	}
 }
 

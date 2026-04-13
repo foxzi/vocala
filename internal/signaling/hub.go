@@ -489,6 +489,26 @@ func handleMessage(c *Client, msg Message) {
 		})
 		GlobalHub.BroadcastToChannel(chID, msg)
 
+	case "screen_on":
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		sfu := rtc.GetSFU(chID)
+		if sfu != nil {
+			sfu.SetExpectScreen(c.UserID, true)
+		}
+
+	case "screen_off":
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		sfu := rtc.GetSFU(chID)
+		if sfu != nil {
+			sfu.SetExpectScreen(c.UserID, false)
+		}
+
 	case "ws_media_mode":
 		c.IsWSMedia = true
 		logger.Debug("signaling: user %d switched to WS media transport", c.UserID)

@@ -1243,6 +1243,10 @@ async function startScreenShare() {
         });
 
         const videoTrack = screenStream.getVideoTracks()[0];
+        // Tell the SFU that the next video track is a screen, not a camera —
+        // classification is flag-based on the server and the camera flag may
+        // already be set from an earlier session restored from localStorage.
+        sendWS({ type: 'screen_on' });
         screenSender = peerConnection.addTrack(videoTrack, screenStream);
         screenAdaptiveCleanup = startAdaptiveBitrate(screenSender, SCREEN_BITRATE_TIERS_BPS, 'screen');
         isScreenSharing = true;
@@ -1275,6 +1279,7 @@ async function stopScreenShare() {
     if (screenSender && peerConnection) {
         peerConnection.removeTrack(screenSender);
     }
+    sendWS({ type: 'screen_off' });
     if (screenStream) {
         screenStream.getTracks().forEach(t => t.stop());
         screenStream = null;
