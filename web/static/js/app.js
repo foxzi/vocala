@@ -934,14 +934,35 @@ function togglePTT() {
 
 // Loads the RNNoise AudioWorklet (idempotent) and returns a connected node,
 // or null if RNNoise is disabled / failed to load.
-let rnnoiseModulePromise = null;
+// Cache: ctx -> Promise<void> for addModule. Different contexts must register separately.
+const _rnnoiseRegistered = new WeakMap();
+let _rnnoiseBlobUrl = null;
+
+async function _buildRnnoiseBlobUrl() {
+    if (_rnnoiseBlobUrl) return _rnnoiseBlobUrl;
+    const [wasmJs, workletJs] = await Promise.all([
+        fetch('/static/vendor/rnnoise-sync.js').then(r => r.text()),
+        fetch('/static/js/rnnoise-worklet.js').then(r => r.text()),
+    ]);
+    const blob = new Blob([wasmJs, '\n;\n', workletJs], { type: 'application/javascript' });
+    _rnnoiseBlobUrl = URL.createObjectURL(blob);
+    return _rnnoiseBlobUrl;
+}
+
 async function loadRnnoiseNode(ctx) {
     if (!rnnoiseEnabled) return null;
     try {
-        if (!rnnoiseModulePromise) {
-            rnnoiseModulePromise = ctx.audioWorklet.addModule('/static/js/rnnoise-worklet.js');
+        if (ctx.sampleRate !== 48000) {
+            console.warn('RNNoise: AudioContext sampleRate is', ctx.sampleRate, 'expected 48000, skipping');
+            return null;
         }
-        await rnnoiseModulePromise;
+        let p = _rnnoiseRegistered.get(ctx);
+        if (!p) {
+            const url = await _buildRnnoiseBlobUrl();
+            p = ctx.audioWorklet.addModule(url);
+            _rnnoiseRegistered.set(ctx, p);
+        }
+        await p;
         return new AudioWorkletNode(ctx, 'NoiseSuppressorWorklet', {
             numberOfInputs: 1,
             numberOfOutputs: 1,
@@ -950,7 +971,7 @@ async function loadRnnoiseNode(ctx) {
         });
     } catch (e) {
         console.error('RNNoise worklet failed to load, falling back to browser NS:', e);
-        rnnoiseModulePromise = null;
+        _rnnoiseRegistered.delete(ctx);
         return null;
     }
 }
@@ -970,7 +991,7 @@ async function startWebRTC() {
         });
 
         // Route audio through Web Audio API GainNode for VAD-based muting
-        audioContext = new AudioContext();
+        audioContext = new AudioContext(rnnoiseEnabled ? { sampleRate: 48000 } : undefined);
         const rnnoiseNode = await loadRnnoiseNode(audioContext);
         const source = audioContext.createMediaStreamSource(localStream);
         gainNode = audioContext.createGain();
@@ -2320,7 +2341,7 @@ async function startWSMedia() {
         });
 
         // Setup VAD (reads raw stream for level detection)
-        audioContext = new AudioContext();
+        audioContext = new AudioContext(rnnoiseEnabled ? { sampleRate: 48000 } : undefined);
         const rnnoiseNode = await loadRnnoiseNode(audioContext);
         const source = audioContext.createMediaStreamSource(localStream);
         gainNode = audioContext.createGain();
