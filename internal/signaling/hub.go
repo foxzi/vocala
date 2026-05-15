@@ -83,9 +83,83 @@ var (
 )
 
 var (
-	chatReactionsMu sync.Mutex
-	chatReactions   = make(map[string]map[string]struct{}) // messageID -> set("userID|emoji")
+	watchersMu sync.RWMutex
+	watchers   = make(map[int64]map[int64]struct{})
 )
+
+func addChatWatcher(channelID, userID int64) {
+	watchersMu.Lock()
+	defer watchersMu.Unlock()
+	if watchers[channelID] == nil {
+		watchers[channelID] = make(map[int64]struct{})
+	}
+	watchers[channelID][userID] = struct{}{}
+}
+
+func removeChatWatcher(channelID, userID int64) {
+	watchersMu.Lock()
+	defer watchersMu.Unlock()
+	if set, ok := watchers[channelID]; ok {
+		delete(set, userID)
+		if len(set) == 0 {
+			delete(watchers, channelID)
+		}
+	}
+}
+
+func removeUserFromAllWatchers(userID int64) {
+	watchersMu.Lock()
+	defer watchersMu.Unlock()
+	for chID, set := range watchers {
+		delete(set, userID)
+		if len(set) == 0 {
+			delete(watchers, chID)
+		}
+	}
+}
+
+func chatWatchersOf(channelID int64) []int64 {
+	watchersMu.RLock()
+	defer watchersMu.RUnlock()
+	set := watchers[channelID]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]int64, 0, len(set))
+	for uid := range set {
+		out = append(out, uid)
+	}
+	return out
+}
+
+// Per-(from,to) huddle invite throttle: at most one invite every 5 seconds.
+const huddleInviteCooldown = 5 * time.Second
+
+var (
+	huddleInviteMu   sync.Mutex
+	huddleInviteLast = map[[2]int64]time.Time{}
+)
+
+func huddleInviteAllowed(from, to int64) bool {
+	huddleInviteMu.Lock()
+	defer huddleInviteMu.Unlock()
+	key := [2]int64{from, to}
+	now := time.Now()
+	if last, ok := huddleInviteLast[key]; ok && now.Sub(last) < huddleInviteCooldown {
+		return false
+	}
+	huddleInviteLast[key] = now
+	// Opportunistic cleanup: drop entries older than 1h.
+	if len(huddleInviteLast) > 1024 {
+		cutoff := now.Add(-time.Hour)
+		for k, t := range huddleInviteLast {
+			if t.Before(cutoff) {
+				delete(huddleInviteLast, k)
+			}
+		}
+	}
+	return true
+}
 
 func (h *Hub) Register(client *Client) {
 	h.mu.Lock()
@@ -105,6 +179,7 @@ func (h *Hub) Unregister(client *Client) {
 	// (a newer connection may have replaced this one via Register)
 	if current, ok := h.clients[client.UserID]; ok && current == client {
 		delete(h.clients, client.UserID)
+		removeUserFromAllWatchers(client.UserID)
 	}
 }
 
@@ -133,6 +208,52 @@ func (h *Hub) BroadcastToChannel(channelID int64, msg []byte) {
 			default:
 			}
 		}
+	}
+}
+
+// BroadcastChatToChannel sends a chat-related message (chat_message,
+// chat_reaction, chat_reaction_remove, etc.) to both voice presence users
+// and chat-only watchers of the channel. For DM channels we strictly
+// limit delivery to the two DM participants (privacy invariant).
+func (h *Hub) BroadcastChatToChannel(channelID int64, msg []byte) {
+	users := channel.GetUsers(channelID)
+	w := chatWatchersOf(channelID)
+	ch, _ := channel.GetByID(channelID)
+	isDM := ch != nil && ch.IsDM
+	allowed := map[int64]struct{}{}
+	if isDM {
+		if ch.DMUserA > 0 {
+			allowed[ch.DMUserA] = struct{}{}
+		}
+		if ch.DMUserB > 0 {
+			allowed[ch.DMUserB] = struct{}{}
+		}
+	}
+	seen := make(map[int64]struct{}, len(users)+len(w))
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	deliver := func(uid int64) {
+		if isDM {
+			if _, ok := allowed[uid]; !ok {
+				return
+			}
+		}
+		if _, ok := seen[uid]; ok {
+			return
+		}
+		seen[uid] = struct{}{}
+		if client, ok := h.clients[uid]; ok {
+			select {
+			case client.Send <- msg:
+			default:
+			}
+		}
+	}
+	for _, u := range users {
+		deliver(u.ID)
+	}
+	for _, uid := range w {
+		deliver(uid)
 	}
 }
 
@@ -395,6 +516,9 @@ func handleMessage(c *Client, msg Message) {
 			return
 		}
 
+		removeChatWatcher(p.ChannelID, c.UserID)
+		channel.MarkChannelRead(c.UserID, p.ChannelID)
+
 		oldCh := channel.GetUserChannel(c.UserID)
 		if oldCh > 0 {
 			cleanupWebRTC(oldCh, c.UserID)
@@ -417,9 +541,58 @@ func handleMessage(c *Client, msg Message) {
 
 		// Send chat history to joining user
 		if history, err := database.GetChatHistory(p.ChannelID, 50); err == nil && len(history) > 0 {
+			ids := make([]string, 0, len(history))
+			for _, m := range history {
+				ids = append(ids, m.ID)
+			}
+			reactions, _ := database.GetReactionsForMessages(ids)
 			historyMsg, _ := json.Marshal(map[string]any{
-				"type":     "chat_history",
-				"messages": history,
+				"type":      "chat_history",
+				"messages":  history,
+				"reactions": reactions,
+			})
+			GlobalHub.SendTo(c.UserID, historyMsg)
+		}
+
+	case "watch_channels":
+		var p struct {
+			ChannelIDs []int64 `json:"channel_ids"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			return
+		}
+		ids := p.ChannelIDs
+		if len(ids) > 200 {
+			ids = ids[:200]
+		}
+		for _, cid := range ids {
+			if cid > 0 && channel.CanJoin(cid, c.UserID, c.IsAdmin) {
+				addChatWatcher(cid, c.UserID)
+			}
+		}
+
+	case "peek_history":
+		var p struct {
+			ChannelID int64 `json:"channel_id"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.ChannelID == 0 {
+			return
+		}
+		if !channel.CanJoin(p.ChannelID, c.UserID, c.IsAdmin) {
+			return
+		}
+		addChatWatcher(p.ChannelID, c.UserID)
+		channel.MarkChannelRead(c.UserID, p.ChannelID)
+		if history, err := database.GetChatHistory(p.ChannelID, 50); err == nil && len(history) > 0 {
+			ids := make([]string, 0, len(history))
+			for _, m := range history {
+				ids = append(ids, m.ID)
+			}
+			reactions, _ := database.GetReactionsForMessages(ids)
+			historyMsg, _ := json.Marshal(map[string]any{
+				"type":      "chat_history",
+				"messages":  history,
+				"reactions": reactions,
 			})
 			GlobalHub.SendTo(c.UserID, historyMsg)
 		}
@@ -563,6 +736,11 @@ func handleMessage(c *Client, msg Message) {
 			sfu.SetExpectScreen(c.UserID, true)
 			logger.Info("signaling: user %d expectScreen=true", c.UserID)
 		}
+		screenOnMsg, _ := json.Marshal(map[string]any{
+			"type":    "screen_on",
+			"user_id": c.UserID,
+		})
+		GlobalHub.BroadcastToChannel(chID, screenOnMsg)
 
 	case "screen_off":
 		chID := channel.GetUserChannel(c.UserID)
@@ -574,6 +752,12 @@ func handleMessage(c *Client, msg Message) {
 			sfu.SetExpectScreen(c.UserID, false)
 			logger.Info("signaling: user %d expectScreen=false", c.UserID)
 		}
+		screenOffMsg, _ := json.Marshal(map[string]any{
+			"type":    "screen_off",
+			"user_id": c.UserID,
+		})
+		GlobalHub.BroadcastToChannel(chID, screenOffMsg)
+		clearPreviewIfSharer(chID, c.UserID)
 
 	case "media_track":
 		// Client tells us which kind ("camera"|"screen") a given outgoing
@@ -603,7 +787,8 @@ func handleMessage(c *Client, msg Message) {
 
 	case "chat_message":
 		var p struct {
-			Text string `json:"text"`
+			Text      string `json:"text"`
+			ChannelID int64  `json:"channel_id"`
 		}
 		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.Text == "" {
 			return
@@ -614,6 +799,11 @@ func handleMessage(c *Client, msg Message) {
 			text = text[:2000]
 		}
 		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 && p.ChannelID > 0 {
+			if channel.CanJoin(p.ChannelID, c.UserID, c.IsAdmin) {
+				chID = p.ChannelID
+			}
+		}
 		if chID == 0 {
 			return
 		}
@@ -643,7 +833,7 @@ func handleMessage(c *Client, msg Message) {
 			"channel_id": chID,
 			"timestamp":  ts,
 		})
-		GlobalHub.BroadcastToChannel(chID, chatMsg)
+		GlobalHub.BroadcastChatToChannel(chID, chatMsg)
 
 	case "chat_reaction":
 		var p struct {
@@ -657,23 +847,42 @@ func handleMessage(c *Client, msg Message) {
 		if len(p.Emoji) > 16 {
 			return
 		}
-		chID := channel.GetUserChannel(c.UserID)
-		if chID == 0 {
+		// Look up the channel the message actually belongs to (not the caller's
+		// current voice channel) so chat-only watchers can react and so we can
+		// verify the caller has access to that channel.
+		msgChID, err := database.GetMessageChannel(p.MessageID)
+		if err != nil || msgChID == 0 {
 			return
 		}
-		key := fmt.Sprintf("%d|%s", c.UserID, p.Emoji)
-		chatReactionsMu.Lock()
-		set, ok := chatReactions[p.MessageID]
-		if !ok {
-			set = make(map[string]struct{})
-			chatReactions[p.MessageID] = set
-		}
-		if _, exists := set[key]; exists {
-			chatReactionsMu.Unlock()
+		if !channel.CanJoin(msgChID, c.UserID, c.IsAdmin) {
 			return
 		}
-		set[key] = struct{}{}
-		chatReactionsMu.Unlock()
+		chID := msgChID
+		inserted, err := database.AddChatReaction(database.ChatReaction{
+			MessageID: p.MessageID,
+			UserID:    c.UserID,
+			Username:  c.Username,
+			Emoji:     p.Emoji,
+		}, time.Now().Unix())
+		if err != nil {
+			logger.Error("signaling: failed to add chat reaction: %v", err)
+			return
+		}
+		if !inserted {
+			if err := database.RemoveChatReaction(p.MessageID, c.UserID, p.Emoji); err != nil {
+				logger.Error("signaling: failed to remove chat reaction: %v", err)
+				return
+			}
+			removeMsg, _ := json.Marshal(map[string]any{
+				"type":       "chat_reaction_remove",
+				"message_id": p.MessageID,
+				"user_id":    c.UserID,
+				"emoji":      p.Emoji,
+				"channel_id": chID,
+			})
+			GlobalHub.BroadcastChatToChannel(chID, removeMsg)
+			return
+		}
 		reactionMsg, _ := json.Marshal(map[string]any{
 			"type":       "chat_reaction",
 			"message_id": p.MessageID,
@@ -682,7 +891,341 @@ func handleMessage(c *Client, msg Message) {
 			"emoji":      p.Emoji,
 			"channel_id": chID,
 		})
-		GlobalHub.BroadcastToChannel(chID, reactionMsg)
+		GlobalHub.BroadcastChatToChannel(chID, reactionMsg)
+
+	case "voice_reaction":
+		var p struct {
+			Emoji string `json:"emoji"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.Emoji == "" {
+			return
+		}
+		if len(p.Emoji) > 16 {
+			return
+		}
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		vrMsg, _ := json.Marshal(map[string]any{
+			"type":       "voice_reaction",
+			"user_id":    c.UserID,
+			"username":   c.Username,
+			"emoji":      p.Emoji,
+			"channel_id": chID,
+		})
+		GlobalHub.BroadcastToChannel(chID, vrMsg)
+
+	case "huddle_invite":
+		var p struct {
+			ToUserID int64 `json:"to_user_id"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.ToUserID == 0 || p.ToUserID == c.UserID {
+			return
+		}
+		if !huddleInviteAllowed(c.UserID, p.ToUserID) {
+			return
+		}
+		ch, err := channel.OpenDM(c.UserID, p.ToUserID)
+		if err != nil {
+			logger.Error("huddle: failed to open DM: %v", err)
+			return
+		}
+		alreadyIn := false
+		for _, u := range channel.GetUsers(ch.ID) {
+			if u.ID == p.ToUserID {
+				alreadyIn = true
+				break
+			}
+		}
+		if alreadyIn {
+			ackMsg, _ := json.Marshal(map[string]any{
+				"type":         "huddle_started",
+				"to_user_id":   p.ToUserID,
+				"channel_id":   ch.ID,
+				"channel_name": ch.Name,
+			})
+			GlobalHub.SendTo(c.UserID, ackMsg)
+			return
+		}
+		now := time.Now()
+		channel.UpdateDMHuddleTime(c.UserID, p.ToUserID, now.Unix())
+
+		sysID := fmt.Sprintf("sys-%d-%d", c.UserID, now.UnixMilli())
+		sysText := "📞 " + c.Username + " started a huddle"
+		_ = database.SaveChatMessage(database.ChatMessage{
+			ID:        sysID,
+			ChannelID: ch.ID,
+			UserID:    c.UserID,
+			Username:  c.Username,
+			Text:      sysText,
+			CreatedAt: now.Unix(),
+			Kind:      "system",
+		})
+		sysMsg, _ := json.Marshal(map[string]any{
+			"type":       "chat_message",
+			"id":         sysID,
+			"user_id":    c.UserID,
+			"username":   c.Username,
+			"text":       sysText,
+			"channel_id": ch.ID,
+			"timestamp":  now.Unix(),
+			"kind":       "system",
+		})
+		GlobalHub.SendTo(c.UserID, sysMsg)
+		GlobalHub.SendTo(p.ToUserID, sysMsg)
+		inviteMsg, _ := json.Marshal(map[string]any{
+			"type":         "huddle_invite",
+			"from_user_id": c.UserID,
+			"from_name":    c.Username,
+			"channel_id":   ch.ID,
+			"channel_name": ch.Name,
+		})
+		GlobalHub.SendToPriority(p.ToUserID, inviteMsg)
+		ackMsg, _ := json.Marshal(map[string]any{
+			"type":         "huddle_started",
+			"to_user_id":   p.ToUserID,
+			"channel_id":   ch.ID,
+			"channel_name": ch.Name,
+		})
+		GlobalHub.SendTo(c.UserID, ackMsg)
+
+	case "huddle_invite_others":
+		var p struct {
+			UserIDs []int64 `json:"user_ids"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil || len(p.UserIDs) == 0 {
+			return
+		}
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		ch, err := channel.GetByID(chID)
+		if err != nil {
+			return
+		}
+		now := time.Now()
+
+		if ch.IsDM {
+			otherID := ch.DMUserA
+			if otherID == c.UserID {
+				otherID = ch.DMUserB
+			}
+			members := append([]int64{c.UserID, otherID}, p.UserIDs...)
+			newCh, err := channel.CreateEphemeral("Group", c.UserID, 0)
+			if err != nil {
+				logger.Error("huddle: create group failed: %v", err)
+				return
+			}
+			for _, uid := range members {
+				if uid > 0 && uid != c.UserID {
+					channel.AddMember(newCh.ID, uid)
+				}
+			}
+			if otherID > 0 && otherID != c.UserID {
+				moveMsg, _ := json.Marshal(map[string]any{
+					"type":         "huddle_invite",
+					"from_user_id": c.UserID,
+					"from_name":    c.Username,
+					"channel_id":   newCh.ID,
+					"channel_name": newCh.Name,
+				})
+				GlobalHub.SendToPriority(otherID, moveMsg)
+			}
+			ackMsg, _ := json.Marshal(map[string]any{
+				"type":         "huddle_started",
+				"channel_id":   newCh.ID,
+				"channel_name": newCh.Name,
+			})
+			GlobalHub.SendTo(c.UserID, ackMsg)
+
+			for _, uid := range p.UserIDs {
+				if uid == 0 || uid == c.UserID || uid == otherID {
+					continue
+				}
+				invite, _ := json.Marshal(map[string]any{
+					"type":         "huddle_invite",
+					"from_user_id": c.UserID,
+					"from_name":    c.Username,
+					"channel_id":   newCh.ID,
+					"channel_name": newCh.Name,
+				})
+				GlobalHub.SendToPriority(uid, invite)
+			}
+			return
+		}
+
+		// Adding members to a non-ephemeral private channel requires manage rights;
+		// for ephemeral huddle channels any member can invite (that's the point).
+		if !ch.IsEphemeral && !channel.CanManage(chID, c.UserID, c.IsAdmin) {
+			errMsg, _ := json.Marshal(map[string]any{
+				"type":  "error",
+				"error": "access_denied",
+				"text":  "Only channel owner can add members",
+			})
+			GlobalHub.SendTo(c.UserID, errMsg)
+			return
+		}
+
+		for _, uid := range p.UserIDs {
+			if uid == 0 || uid == c.UserID {
+				continue
+			}
+			channel.AddMember(chID, uid)
+			invite, _ := json.Marshal(map[string]any{
+				"type":         "huddle_invite",
+				"from_user_id": c.UserID,
+				"from_name":    c.Username,
+				"channel_id":   ch.ID,
+				"channel_name": ch.Name,
+			})
+			GlobalHub.SendToPriority(uid, invite)
+
+			added, _ := auth.GetUserByID(uid)
+			addedName := "someone"
+			if added != nil {
+				addedName = added.Username
+			}
+			sysID := fmt.Sprintf("sys-add-%d-%d-%d", c.UserID, uid, now.UnixMilli())
+			sysText := "👥 " + c.Username + " added " + addedName + " to the conversation"
+			_ = database.SaveChatMessage(database.ChatMessage{
+				ID:        sysID,
+				ChannelID: chID,
+				UserID:    c.UserID,
+				Username:  c.Username,
+				Text:      sysText,
+				CreatedAt: now.Unix(),
+				Kind:      "system",
+			})
+			sysMsg, _ := json.Marshal(map[string]any{
+				"type":       "chat_message",
+				"id":         sysID,
+				"user_id":    c.UserID,
+				"username":   c.Username,
+				"text":       sysText,
+				"channel_id": chID,
+				"timestamp":  now.Unix(),
+				"kind":       "system",
+			})
+			GlobalHub.BroadcastChatToChannel(chID, sysMsg)
+		}
+
+	case "huddle_end":
+		chID := channel.GetUserChannel(c.UserID)
+		if chID == 0 {
+			return
+		}
+		ch, err := channel.GetByID(chID)
+		if err != nil {
+			return
+		}
+		now := time.Now()
+		sysID := fmt.Sprintf("sys-end-%d-%d", c.UserID, now.UnixMilli())
+		sysText := "📞 " + c.Username + " ended the huddle"
+		_ = database.SaveChatMessage(database.ChatMessage{
+			ID:        sysID,
+			ChannelID: chID,
+			UserID:    c.UserID,
+			Username:  c.Username,
+			Text:      sysText,
+			CreatedAt: now.Unix(),
+			Kind:      "system",
+		})
+		sysMsg, _ := json.Marshal(map[string]any{
+			"type":       "chat_message",
+			"id":         sysID,
+			"user_id":    c.UserID,
+			"username":   c.Username,
+			"text":       sysText,
+			"channel_id": chID,
+			"timestamp":  now.Unix(),
+			"kind":       "system",
+		})
+		endMsg, _ := json.Marshal(map[string]any{
+			"type":         "huddle_ended",
+			"from_user_id": c.UserID,
+			"from_name":    c.Username,
+			"channel_id":   chID,
+			"is_dm":        ch.IsDM,
+		})
+		if ch.IsDM {
+			GlobalHub.SendTo(ch.DMUserA, sysMsg)
+			GlobalHub.SendTo(ch.DMUserB, sysMsg)
+			GlobalHub.SendTo(ch.DMUserA, endMsg)
+			GlobalHub.SendTo(ch.DMUserB, endMsg)
+		} else {
+			GlobalHub.BroadcastChatToChannel(chID, sysMsg)
+			GlobalHub.BroadcastChatToChannel(chID, endMsg)
+		}
+
+	case "huddle_decline":
+		var p struct {
+			FromUserID int64 `json:"from_user_id"`
+			ChannelID  int64 `json:"channel_id"`
+			Missed     bool  `json:"missed"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.FromUserID == 0 {
+			return
+		}
+		// Only the actual recipient of a DM call may decline it; this prevents
+		// any authenticated user from forging "missed call" system messages.
+		if p.ChannelID > 0 {
+			ch, err := channel.GetByID(p.ChannelID)
+			if err != nil || !ch.IsDM {
+				return
+			}
+			if c.UserID != ch.DMUserA && c.UserID != ch.DMUserB {
+				return
+			}
+			if p.FromUserID != ch.DMUserA && p.FromUserID != ch.DMUserB {
+				return
+			}
+			if p.FromUserID == c.UserID {
+				return
+			}
+		}
+		declineMsg, _ := json.Marshal(map[string]any{
+			"type":         "huddle_declined",
+			"from_user_id": c.UserID,
+			"from_name":    c.Username,
+			"channel_id":   p.ChannelID,
+			"missed":       p.Missed,
+		})
+		GlobalHub.SendToPriority(p.FromUserID, declineMsg)
+
+		// Only persist a system message for actually-missed calls; an explicit
+		// "Dismiss" by the recipient should not pollute chat history.
+		if p.ChannelID > 0 && p.Missed {
+			now := time.Now()
+			fromUser, _ := auth.GetUserByID(p.FromUserID)
+			fromUsername := "user"
+			if fromUser != nil {
+				fromUsername = fromUser.Username
+			}
+			text := "❌ Missed call from " + fromUsername
+			sysID := fmt.Sprintf("sys-miss-%d-%d", c.UserID, now.UnixMilli())
+			_ = database.SaveChatMessage(database.ChatMessage{
+				ID:        sysID,
+				ChannelID: p.ChannelID,
+				UserID:    p.FromUserID,
+				Username:  fromUsername,
+				Text:      text,
+				CreatedAt: now.Unix(),
+				Kind:      "system",
+			})
+			sysMsg, _ := json.Marshal(map[string]any{
+				"type":       "chat_message",
+				"id":         sysID,
+				"user_id":    p.FromUserID,
+				"username":   fromUsername,
+				"text":       text,
+				"channel_id": p.ChannelID,
+				"timestamp":  now.Unix(),
+				"kind":       "system",
+			})
+			GlobalHub.BroadcastChatToChannel(p.ChannelID, sysMsg)
+		}
 
 	case "clear_chat":
 		if !c.IsAdmin {
@@ -693,14 +1236,11 @@ func handleMessage(c *Client, msg Message) {
 			return
 		}
 		database.ClearChannelMessages(chID)
-		chatReactionsMu.Lock()
-		chatReactions = make(map[string]map[string]struct{})
-		chatReactionsMu.Unlock()
 		clearMsg, _ := json.Marshal(map[string]any{
 			"type":       "chat_cleared",
 			"channel_id": chID,
 		})
-		GlobalHub.BroadcastToChannel(chID, clearMsg)
+		GlobalHub.BroadcastChatToChannel(chID, clearMsg)
 
 	case "screen_preview":
 		var p struct {
