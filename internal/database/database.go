@@ -65,6 +65,15 @@ func migrate() {
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS chat_reactions (
+			message_id TEXT NOT NULL,
+			user_id INTEGER NOT NULL,
+			username TEXT NOT NULL,
+			emoji TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (message_id, user_id, emoji)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_chat_reactions_message ON chat_reactions(message_id)`,
 		`CREATE TABLE IF NOT EXISTS channel_members (
 			channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -110,6 +119,20 @@ func migrate() {
 		`ALTER TABLE users ADD COLUMN oauth_provider TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN oauth_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE channels ADD COLUMN is_ephemeral INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN ephemeral_empty_since INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN is_dm INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN dm_user_a INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN dm_user_b INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN last_huddle_at INTEGER NOT NULL DEFAULT 0`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_dm_pair ON channels(dm_user_a, dm_user_b) WHERE is_dm = 1`,
+		`ALTER TABLE chat_messages ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE IF NOT EXISTS channel_last_read (
+			user_id INTEGER NOT NULL,
+			channel_id INTEGER NOT NULL,
+			last_read_at INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (user_id, channel_id)
+		)`,
 	}
 	for _, q := range migrations {
 		DB.Exec(q) // ignore errors if columns already exist
