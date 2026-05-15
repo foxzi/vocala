@@ -1,7 +1,18 @@
 let ws = null;
 let currentChannelID = null;
+let isCurrentChannelDM = false;
+let isDMHuddleActive = false;
+let incomingCallChannelID = null;
+let outgoingCallChannelID = null;
+let outgoingCalleeUserId = null;
+let outgoingCalleeUsername = null;
+let activeCallChannelID = null;
+let activeCallChannelName = null;
 let isMuted = localStorage.getItem('vocala-muted') === 'true';
 let reconnectAttempts = 0;
+let wsLastOpenAt = 0;
+let wsRapidBounceCount = 0;
+let wsBouncedOut = false;
 
 // XSS-safe HTML escaping
 const SPEAKING_LABELS = ['bzzz', 'oooo', 'aaaa', 'yoho', 'wooo', 'hehe', 'mhm', 'pew', 'rawr', 'meow', 'woof', 'yay', 'huh', 'ohno', 'blah', 'nani', 'eeek', 'gulp', 'zzz', 'bam', 'pow', 'boop', 'nom', 'uwu', 'aha', 'hmm', 'eep', 'oof', 'yip', 'arr'];
@@ -53,6 +64,23 @@ function playChatSound() {
     setTimeout(() => playTone(1100, 0.1, 'sine', 0.06), 60);
 }
 
+let _ringtoneTimer = null;
+function startRingtone() {
+    if (_ringtoneTimer) return;
+    const ring = () => {
+        playTone(880, 0.18, 'sine', 0.18);
+        setTimeout(() => playTone(660, 0.18, 'sine', 0.18), 220);
+    };
+    ring();
+    _ringtoneTimer = setInterval(ring, 2000);
+}
+function stopRingtone() {
+    if (_ringtoneTimer) {
+        clearInterval(_ringtoneTimer);
+        _ringtoneTimer = null;
+    }
+}
+
 function toggleSounds() {
     notifSoundsEnabled = !notifSoundsEnabled;
     localStorage.setItem('vocala-sounds', notifSoundsEnabled ? 'on' : 'off');
@@ -63,6 +91,29 @@ function toggleRnnoise() {
     rnnoiseEnabled = !rnnoiseEnabled;
     localStorage.setItem('vocala-rnnoise', rnnoiseEnabled ? '1' : '0');
     return rnnoiseEnabled;
+}
+
+function toggleAgc() {
+    agcEnabled = !agcEnabled;
+    localStorage.setItem('vocala-agc', agcEnabled ? '1' : '0');
+    if (localStream) {
+        localStream.getAudioTracks().forEach(t => {
+            t.applyConstraints({ autoGainControl: agcEnabled }).catch(() => {});
+        });
+    }
+    return agcEnabled;
+}
+
+function toggleNoiseSuppression() {
+    noiseSuppressionEnabled = !noiseSuppressionEnabled;
+    localStorage.setItem('vocala-ns', noiseSuppressionEnabled ? '1' : '0');
+    if (localStream) {
+        const effective = noiseSuppressionEnabled && !rnnoiseEnabled;
+        localStream.getAudioTracks().forEach(t => {
+            t.applyConstraints({ noiseSuppression: effective }).catch(() => {});
+        });
+    }
+    return noiseSuppressionEnabled;
 }
 
 // --- Browser notifications ---
@@ -169,6 +220,7 @@ function connectWS() {
 
     ws.onopen = () => {
         reconnectAttempts = 0;
+        wsLastOpenAt = Date.now();
         setConnectionStatus('connected');
         const dbg = document.getElementById('guest-debug');
         if (dbg) dbg.textContent = 'WS connected, joining channel ' + (window.VOCALA_GUEST_CHANNEL || 'none');
@@ -208,10 +260,21 @@ function connectWS() {
 
     ws.onclose = (e) => {
         console.warn('WS closed: code=' + e.code + ' reason=' + (e.reason || '(none)') + ' wasClean=' + e.wasClean);
+        if (wsLastOpenAt > 0 && Date.now() - wsLastOpenAt < 2000) {
+            wsRapidBounceCount++;
+        } else {
+            wsRapidBounceCount = 0;
+        }
+        if (wsRapidBounceCount >= 3 && !wsBouncedOut) {
+            wsBouncedOut = true;
+            setConnectionStatus('reconnecting');
+            showDoubleLoginBanner();
+            return;
+        }
         setConnectionStatus('reconnecting');
         const dbg = document.getElementById('guest-debug');
         if (dbg) dbg.textContent = 'WS closed: code=' + e.code + ' reason=' + e.reason;
-        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+        const delay = reconnectAttempts === 0 ? 0 : Math.min(1000 * Math.pow(2, reconnectAttempts - 1), 30000);
         reconnectAttempts++;
         setTimeout(connectWS, delay);
     };
@@ -266,6 +329,15 @@ function handleWSMessage(msg) {
             }
             break;
         case 'camera_on':
+            {
+                const stale = document.getElementById('remote-cam-camera-' + msg.user_id);
+                if (stale) {
+                    const v = stale.querySelector('video');
+                    if (v) { try { v.pause(); } catch (_) {} v.srcObject = null; }
+                    stale.remove();
+                    updateGridColumns();
+                }
+            }
             // Someone turned on camera — check if we see it after delay
             setTimeout(() => {
                 const el = document.getElementById('remote-cam-camera-' + msg.user_id);
@@ -280,15 +352,25 @@ function handleWSMessage(msg) {
             }, 3000);
             break;
         case 'camera_off':
-            // Remove remote camera when user turns it off
-            const camEl = document.getElementById('remote-cam-camera-' + msg.user_id);
-            if (camEl) { camEl.remove(); updateGridColumns(); }
+            {
+                const camElId = 'remote-cam-camera-' + msg.user_id;
+                if (document.getElementById(camElId)) {
+                    removeFromCameraGrid(camElId);
+                }
+            }
             break;
         case 'chat_message':
             appendChatMessage(msg);
+            if (typeof loadDMListDebounced === 'function') loadDMListDebounced();
+            if (typeof bumpDMUnread === 'function' && msg.kind !== 'system') {
+                const selfName = document.getElementById('self-avatar')?.dataset?.username;
+                if (msg.username !== selfName) {
+                    bumpDMUnread(msg.channel_id);
+                }
+            }
             break;
         case 'chat_history':
-            loadChatHistory(msg.messages || []);
+            loadChatHistory(msg.messages || [], msg.reactions || []);
             break;
         case 'chat_cleared':
             const chatContainer = document.getElementById('chat-messages');
@@ -297,16 +379,64 @@ function handleWSMessage(msg) {
         case 'chat_reaction':
             addChatReaction(msg);
             break;
+        case 'voice_reaction':
+            showVoiceReaction(msg);
+            break;
+        case 'huddle_invite':
+            showHuddleInvite(msg);
+            loadDMListDebounced();
+            break;
+        case 'huddle_started':
+            outgoingCallChannelID = msg.channel_id;
+            updateCallIndicators();
+            if (!(currentChannelID === msg.channel_id && isDMHuddleActive)) {
+                currentChannelID = null;
+                joinChannel(msg.channel_id, msg.channel_name, { forceHuddle: true });
+            }
+            loadDMListDebounced();
+            loadGroupListDebounced();
+            break;
+        case 'huddle_declined':
+            outgoingCallChannelID = null;
+            outgoingCalleeUserId = null;
+            outgoingCalleeUsername = null;
+            removeOutgoingPhantomCard();
+            updateCallIndicators();
+            showToast(msg.missed ? (msg.from_name || 'User') + ' missed your call' : (msg.from_name || 'User') + ' declined the huddle');
+            break;
+        case 'huddle_ended':
+            outgoingCallChannelID = null;
+            outgoingCalleeUserId = null;
+            outgoingCalleeUsername = null;
+            removeOutgoingPhantomCard();
+            updateCallIndicators();
+            if (currentChannelID === msg.channel_id) {
+                if (msg.is_dm && isDMHuddleActive && msg.from_user_id !== undefined) {
+                    isDMHuddleActive = false;
+                    chatOnlyChannelID = msg.channel_id;
+                    cleanupWebRTC();
+                    const dmRow = document.querySelector(`#dm-list [data-dm-channel="${msg.channel_id}"]`);
+                    const otherName = dmRow ? (dmRow.querySelector('.text-vc-text')?.textContent || (msg.from_name || 'Direct message')) : (msg.from_name || 'Direct message');
+                    sendWS({ type: 'leave_channel' });
+                    renderChannelChatOnly(msg.channel_id, otherName, { isDM: true });
+                    sendWS({ type: 'peek_history', payload: { channel_id: msg.channel_id } });
+                } else {
+                    showToast((msg.from_name || 'Someone') + ' left the huddle');
+                }
+                loadDMListDebounced();
+            }
+            break;
+        case 'chat_reaction_remove':
+            removeChatReaction(msg);
+            break;
         case 'screen_preview':
             // Only accept data: URIs to prevent injection via url()
             if (msg.payload.image && msg.payload.image.startsWith('data:image/')) {
                 latestScreenPreview = msg.payload.image;
             }
             screenShareUsername = msg.username || null;
-            // If there's already a play overlay visible, update its background
-            if (document.getElementById('screen-share-play-overlay')) {
-                updateScreenPreviewOverlay();
-            } else if (!document.getElementById('screen-share-video') || document.getElementById('screen-share-video').classList.contains('hidden')) {
+            if (!document.getElementById('screen-share-play-overlay') &&
+                (!document.getElementById('screen-share-video') || document.getElementById('screen-share-video').classList.contains('hidden'))) {
                 // No video playing yet — show a preview container so user sees something is shared
                 showScreenPreviewPlaceholder();
             }
@@ -315,6 +445,26 @@ function handleWSMessage(msg) {
             latestScreenPreview = null;
             screenShareUsername = null;
             removeRemoteVideo();
+            break;
+        case 'screen_off':
+            {
+                if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+                const grid = document.getElementById('camera-grid');
+                if (grid) {
+                    grid.querySelectorAll('[id^="remote-screen-share-"]').forEach(el => {
+                        const v = el.querySelector('video');
+                        if (v) { try { v.pause(); } catch (_) {} v.srcObject = null; }
+                        el.remove();
+                    });
+                    updateGridColumns();
+                }
+                document.body.classList.remove('expanded-tile-mode');
+                expandedCamId = null;
+                clearExpandedUsersRail();
+                attachUserPreviewsToCards();
+                latestScreenPreview = null;
+                screenShareUsername = null;
+            }
             break;
     }
 }
@@ -347,11 +497,23 @@ const channelUserSets = {};
 const channelUsersData = {}; // channelID -> [{Username, ID, Muted, Speaking}, ...]
 
 function updateChannelUsers(channelID, users) {
+    users = (users || []).map(u => u.Muted ? { ...u, Speaking: false } : u);
     const container = document.getElementById(`ch-users-${channelID}`);
     const countEl = document.getElementById(`ch-count-${channelID}`);
 
     // Store for preview
     channelUsersData[channelID] = users;
+    if (outgoingCallChannelID === channelID && outgoingCalleeUserId) {
+        const joined = users.some(u => u.ID === outgoingCalleeUserId);
+        if (joined) {
+            outgoingCallChannelID = null;
+            outgoingCalleeUserId = null;
+            outgoingCalleeUsername = null;
+            if (typeof removeOutgoingPhantomCard === 'function') removeOutgoingPhantomCard();
+        }
+    }
+    if (typeof updateActiveHuddleBadges === 'function') updateActiveHuddleBadges();
+    if (typeof updateCallIndicators === 'function') updateCallIndicators();
 
     // Update preview if currently previewing this channel
     if (previewChannelID === channelID && currentChannelID !== channelID) {
@@ -419,15 +581,18 @@ function updateChannelUsers(channelID, users) {
                 const avatar = existing.querySelector('.sb-avatar');
                 if (avatar) avatar.className = `sb-avatar w-6 h-6 rounded-full ${u.Speaking ? 'ring-2 ring-vc-green/40' : ''} overflow-hidden`;
                 const name = existing.querySelector('.sb-name');
-                if (name) name.className = `sb-name ${u.Muted ? 'text-vc-muted line-through' : 'text-vc-text'}`;
+                if (name) name.className = `sb-name ${u.Muted ? 'text-vc-muted' : 'text-vc-text'}`;
                 const muteIcon = existing.querySelector('.sb-mute');
                 if (muteIcon) muteIcon.style.display = u.Muted ? '' : 'none';
                 const speakingEl = existing.querySelector('.sb-speaking');
                 if (speakingEl) speakingEl.style.display = u.Speaking ? '' : 'none';
             } else {
+                const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
+                const isSelf = u.Username === selfName;
                 const div = document.createElement('div');
                 div.dataset.sidebarUser = u.Username;
-                div.className = 'flex items-center gap-2 px-2 py-1 rounded text-sm fade-in';
+                div.dataset.userId = u.ID;
+                div.className = 'group flex items-center gap-2 px-2 py-1 rounded text-sm fade-in hover:bg-vc-hover/40';
                 div.innerHTML = `
                     <div class="relative">
                         <div class="sb-avatar w-6 h-6 rounded-full ${u.Speaking ? 'ring-2 ring-vc-green/40' : ''} overflow-hidden">
@@ -437,6 +602,9 @@ function updateChannelUsers(channelID, users) {
                     <span class="sb-name ${u.Muted ? 'text-vc-muted line-through' : 'text-vc-text'}">${escapeHTML(u.Username)}</span>
                     <svg class="sb-mute w-3 h-3 text-vc-red ml-auto" fill="currentColor" viewBox="0 0 24 24" style="display:${u.Muted ? '' : 'none'}"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>
                     <div class="sb-speaking ml-auto flex gap-0.5" style="display:${u.Speaking ? '' : 'none'}"><div class="w-1 h-3 bg-vc-accent rounded-full animate-pulse"></div><div class="w-1 h-4 bg-vc-accent rounded-full animate-pulse" style="animation-delay:0.1s"></div><div class="w-1 h-2 bg-vc-accent rounded-full animate-pulse" style="animation-delay:0.2s"></div></div>
+                    ${!isSelf ? `<button class="sb-huddle-btn ml-1 invisible group-hover:visible text-vc-muted hover:text-vc-accent transition" title="Start huddle" onclick="event.stopPropagation(); startHuddle(${u.ID})">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/></svg>
+                    </button>` : ''}
                 `;
                 container.appendChild(div);
             }
@@ -450,8 +618,17 @@ function updateChannelUsers(channelID, users) {
 }
 
 function updatePresence(channels) {
+    const seen = new Set();
     for (const [chID, users] of Object.entries(channels)) {
-        updateChannelUsers(parseInt(chID), users || []);
+        const id = parseInt(chID);
+        seen.add(id);
+        updateChannelUsers(id, users || []);
+    }
+    for (const id of Object.keys(channelUsersData)) {
+        const numId = parseInt(id);
+        if (!seen.has(numId) && (channelUsersData[numId] || []).length > 0) {
+            updateChannelUsers(numId, []);
+        }
     }
 }
 
@@ -473,10 +650,14 @@ function toggleSidebar() {
 function toggleMobileChat() {
     const panel = document.getElementById('chat-panel');
     if (!panel) return;
-    panel.classList.toggle('hidden');
-    panel.classList.toggle('flex');
-    // Scroll to bottom when showing
-    if (!panel.classList.contains('hidden')) {
+    const isMobile = window.innerWidth < 768;
+    if (isMobile) {
+        panel.classList.toggle('hidden');
+        panel.classList.toggle('flex');
+    } else {
+        panel.classList.toggle('chat-hidden');
+    }
+    if (!panel.classList.contains('hidden') && !panel.classList.contains('chat-hidden')) {
         const msgs = document.getElementById('chat-messages');
         if (msgs) msgs.scrollTop = msgs.scrollHeight;
     }
@@ -496,60 +677,14 @@ function closeSidebarOnMobile() {
 let previewChannelID = null;
 
 function previewChannel(channelID, channelName, isPrivate) {
-    // If already in this channel, do nothing
     if (currentChannelID === channelID) return;
-
-    previewChannelID = channelID;
-
-    // Highlight in sidebar
-    document.querySelectorAll('.channel-item').forEach(el => {
-        el.classList.toggle('bg-vc-hover/50', +el.dataset.channelId === channelID);
-    });
-
-    const users = channelUsersData[channelID] || [];
-
-    const mainContent = document.getElementById('main-content');
-    mainContent.innerHTML = `
-        <div class="flex flex-col items-center justify-center h-full gap-6 p-6">
-            <div class="w-20 h-20 rounded-2xl bg-vc-channel flex items-center justify-center">
-                ${isPrivate
-                    ? '<svg class="w-10 h-10 text-vc-yellow" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>'
-                    : '<svg class="w-10 h-10 text-vc-accent" fill="currentColor" viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>'
-                }
-            </div>
-            <div class="text-center">
-                <h2 class="text-xl font-bold">${escapeHTML(channelName)}</h2>
-                ${isPrivate ? '<span class="text-xs text-vc-yellow">Private channel</span>' : ''}
-            </div>
-            <div id="preview-users" class="text-center">
-                ${users.length > 0
-                    ? `<div class="text-sm text-vc-muted mb-2">${users.length} user${users.length > 1 ? 's' : ''} in channel:</div>
-                       <div class="flex flex-wrap justify-center gap-3 mb-4">
-                           ${users.map(u => `
-                               <div class="flex items-center gap-2 px-3 py-1.5 bg-vc-channel rounded-lg">
-                                   <img src="${avatarURL(u.Username)}" class="w-6 h-6 rounded-full">
-                                   <span class="text-sm text-vc-text">${escapeHTML(u.Username)}</span>
-                                   ${u.Muted ? '<svg class="w-3 h-3 text-vc-red" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : ''}
-                                   ${u.Speaking ? '<div class="flex gap-0.5"><div class="w-1 h-2 bg-vc-green rounded-full animate-pulse"></div><div class="w-1 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.1s"></div></div>' : ''}
-                               </div>
-                           `).join('')}
-                       </div>`
-                    : '<div class="text-sm text-vc-muted mb-4">No one in this channel</div>'
-                }
-            </div>
-            <button data-action="join-channel" data-ch-id="${channelID}" data-ch-name="${escapeHTML(channelName)}"
-                class="px-6 py-2.5 bg-vc-accent hover:bg-vc-accent/80 text-white font-medium rounded-lg transition flex items-center gap-2">
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 16l-4-4m0 0l4-4m-4 4h14m-5 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h7a3 3 0 013 3v1"/>
-                </svg>
-                Join Channel
-            </button>
-        </div>
-    `;
+    joinChannel(channelID, channelName, { chatOnly: true });
 }
 
-function joinChannel(channelID, channelName) {
-    if (currentChannelID === channelID) return;
+let chatOnlyChannelID = null;
+
+function joinChannel(channelID, channelName, opts) {
+    if (currentChannelID === channelID && !opts?.forceHuddle) return;
 
     document.querySelectorAll('.channel-item').forEach(el => {
         el.classList.remove('bg-vc-hover/50');
@@ -557,11 +692,44 @@ function joinChannel(channelID, channelName) {
     const item = document.querySelector(`[data-channel-id="${channelID}"]`);
     if (item) item.classList.add('bg-vc-hover/50');
 
-    // Cleanup previous WebRTC
-    cleanupWebRTC();
+    // Clicking the channel we're already voice-joined to (after peeking
+    // elsewhere) just restores the call view — don't rejoin or teardown.
+    // This applies even when the click path defaults to chatOnly (DM/group),
+    // because the user clearly wants their active call back.
+    if (activeCallChannelID === channelID && !opts?.forceHuddle) {
+        returnToActiveCall();
+        return;
+    }
+
+    const isDM = !!opts?.isDM || dmChannelIds.has(channelID) || /^dm-\d+-\d+$/.test(String(channelName || ''));
+    const startHuddleNow = !!opts?.forceHuddle;
+    const chatOnly = (!!opts?.chatOnly || (isDM && !startHuddleNow)) && !startHuddleNow;
+
+    // If we're already voice-joined to a different channel and the user is
+    // just peeking another channel's chat — keep the call alive in the
+    // background instead of tearing it down and yanking them out.
+    const keepCallAlive = chatOnly && activeCallChannelID && activeCallChannelID !== channelID;
+    if (!keepCallAlive) {
+        cleanupWebRTC();
+    } else {
+        stashCallView();
+    }
 
     currentChannelID = channelID;
-    sendWS({ type: 'join_channel', payload: { channel_id: channelID } });
+    isCurrentChannelDM = isDM;
+    isDMHuddleActive = isDM && startHuddleNow;
+    if (isDM && typeof clearDMUnread === 'function') {
+        clearDMUnread(channelID);
+    }
+    chatOnlyChannelID = chatOnly ? channelID : null;
+    if (chatOnly) {
+        if (!keepCallAlive) {
+            sendWS({ type: 'leave_channel' });
+        }
+        sendWS({ type: 'peek_history', payload: { channel_id: channelID } });
+    } else {
+        sendWS({ type: 'join_channel', payload: { channel_id: channelID } });
+    }
 
     // Update URL to permanent link
     if (!window.VOCALA_GUEST_CHANNEL) {
@@ -572,6 +740,12 @@ function joinChannel(channelID, channelName) {
     closeSidebarOnMobile();
     const mobileChName = document.getElementById('mobile-channel-name');
     if (mobileChName) mobileChName.textContent = channelName;
+
+    if (chatOnly || (isCurrentChannelDM && !isDMHuddleActive)) {
+        try { sessionStorage.removeItem('vocala-in-call'); } catch (_) {}
+        renderChannelChatOnly(channelID, channelName, { isDM: isCurrentChannelDM });
+        return;
+    }
 
     const mainContent = document.getElementById('main-content');
     mainContent.innerHTML = `
@@ -585,34 +759,37 @@ function joinChannel(channelID, channelName) {
                     <div class="w-2 h-2 rounded-full bg-vc-yellow animate-pulse"></div>
                     <span class="text-xs text-vc-yellow">Connecting...</span>
                 </div>
-                ${window.VOCALA_GUEST_CHANNEL ? '' : `<button onclick="createGuestLink(${channelID})" class="ml-auto px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-muted hover:text-vc-text text-xs md:text-sm rounded-lg transition flex-shrink-0 border border-vc-border" title="Generate guest invite link">
-                    Guest Link
-                </button>`}
-                <button onclick="leaveChannel()" class="px-3 py-1.5 bg-vc-red/20 hover:bg-vc-red/30 text-vc-red text-xs md:text-sm font-medium rounded-lg transition flex-shrink-0">
-                    Leave
-                </button>
+                <div class="ml-auto flex items-center gap-2">
+                    ${window.VOCALA_GUEST_CHANNEL ? '' : `<button onclick="createGuestLink(${channelID})" class="px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-muted hover:text-vc-text text-xs md:text-sm rounded-lg transition flex-shrink-0 border border-vc-border" title="Generate guest invite link">
+                        Guest Link
+                    </button>`}
+                </div>
             </div>
             <div class="flex-1 flex flex-col md:flex-row overflow-hidden">
                 <!-- Voice/Video area -->
-                <div class="flex-1 flex flex-col overflow-y-auto p-3 md:p-6 min-h-0">
+                <div id="voice-area" class="flex-1 flex flex-col overflow-y-auto p-3 md:p-6 min-h-0 relative">
                     <div id="screen-share-anchor"></div>
-                    <div class="flex-1 flex items-center justify-center" id="channel-view-users">
+                    <div class="flex-1 flex items-center justify-center pt-3" id="channel-view-users">
                         <div class="text-center text-vc-muted">
                             <p>Joining channel...</p>
                         </div>
                     </div>
+                    <div id="expanded-users-rail"></div>
                 </div>
                 <!-- Chat panel (hidden on mobile by default, toggle with button) -->
-                <div id="chat-panel" class="w-full md:w-80 border-t md:border-t-0 md:border-l border-vc-border flex flex-col bg-vc-sidebar/30 max-h-64 md:max-h-none hidden md:flex">
+                <div id="chat-panel" class="w-full md:w-64 border-t md:border-t-0 md:border-l border-vc-border flex flex-col bg-vc-sidebar/30 max-h-64 md:max-h-none hidden md:flex">
                     <div class="px-3 py-2 border-b border-vc-border flex items-center gap-2">
                         <svg class="w-4 h-4 text-vc-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
                         </svg>
                         <span class="text-xs font-medium text-vc-muted">Chat</span>
-                        ${window.VOCALA_IS_ADMIN ? `<button onclick="clearChat()" class="ml-auto text-[10px] text-vc-muted hover:text-vc-red transition" title="Clear chat history">Clear</button>` : ''}
-                        <button onclick="toggleMobileChat()" class="ml-auto md:hidden text-vc-muted hover:text-vc-text">
-                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-                        </button>
+                        <div class="ml-auto flex items-center gap-2">
+                            ${window.VOCALA_IS_ADMIN ? `<button onclick="clearChat()" class="text-[10px] text-vc-muted hover:text-vc-red transition" title="Clear chat history">Clear</button>` : ''}
+                            <button onclick="toggleMobileChat()" class="flex items-center gap-1 text-[10px] text-vc-muted hover:text-vc-text px-2 py-0.5 rounded border border-vc-border hover:bg-vc-hover transition" title="Hide chat">
+                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                                <span>Hide</span>
+                            </button>
+                        </div>
                     </div>
                     <div id="chat-messages" class="flex-1 overflow-y-auto p-2 space-y-1 min-h-0"></div>
                     <div class="p-2 border-t border-vc-border">
@@ -628,42 +805,56 @@ function joinChannel(channelID, channelName) {
                     </div>
                 </div>
             </div>
-            <div class="px-3 md:px-6 py-2 md:py-3 border-t border-vc-border bg-vc-sidebar/50">
+            <div class="channel-controls-bar flex-shrink-0 sticky bottom-0 z-50 px-3 md:px-6 py-2 md:py-3 border-t border-vc-border bg-vc-sidebar" style="padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 0.5rem);">
                 <!-- Row 1: Main buttons -->
-                <div class="flex items-center justify-center gap-2 md:gap-4">
-                    <button onclick="toggleMute()" id="main-mute-btn"
-                        class="flex items-center gap-1.5 px-3 py-2 rounded-lg ${isMuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel hover:bg-vc-hover text-vc-text'} transition text-sm">
+                <div class="flex items-center justify-center gap-2 md:gap-3">
+                    <button onclick="toggleMute()" id="main-mute-btn" title="${isMuted ? 'Unmute' : 'Mute'}"
+                        class="flex items-center justify-center w-10 h-10 rounded-full ${isMuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel hover:bg-vc-hover text-vc-text'} transition">
                         <svg class="w-5 h-5" id="main-icon-mic" fill="currentColor" viewBox="0 0 24 24">
                             ${isMuted ?
                                 '<path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.08c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/>' :
                                 '<path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>'}
                         </svg>
-                        <span id="main-mute-text" class="hidden md:inline">${isMuted ? 'Unmute' : 'Mute'}</span>
+                        <span id="main-mute-text" class="sr-only">${isMuted ? 'Unmute' : 'Mute'}</span>
                     </button>
-                    <button onclick="toggleCamera()" id="camera-btn"
-                        class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition text-sm">
+                    <button onclick="toggleCamera()" id="camera-btn" title="Toggle camera"
+                        class="flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                         </svg>
-                        <span class="hidden md:inline">Camera</span>
                     </button>
-                    <button onclick="isScreenSharing ? stopScreenShare() : startScreenShare()" id="screen-share-btn"
-                        class="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition text-sm">
+                    <button onclick="isScreenSharing ? stopScreenShare() : startScreenShare()" id="screen-share-btn" title="Share screen"
+                        class="flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
                         </svg>
-                        <span class="hidden md:inline">Screen</span>
                     </button>
-                    <button onclick="togglePTT()" id="ptt-btn"
-                        class="flex items-center gap-1.5 px-3 py-2 rounded-lg ${pushToTalk ? 'bg-vc-accent/20 text-vc-accent' : 'bg-vc-channel hover:bg-vc-hover text-vc-muted'} transition text-sm">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <button onclick="showBarReactionPicker(this)" id="bar-react-btn" title="Send reaction"
+                        class="flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                    </button>
+                    <button onclick="togglePTT()" id="ptt-btn" title="Push to talk: ${pushToTalk ? 'ON' : 'OFF'}"
+                        class="flex items-center justify-center w-10 h-10 rounded-full ${pushToTalk ? 'bg-vc-accent/20 text-vc-accent' : 'bg-vc-channel hover:bg-vc-hover text-vc-muted'} transition">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
                         </svg>
-                        <span class="hidden md:inline">PTT ${pushToTalk ? 'ON' : 'OFF'}</span>
                     </button>
-                    <button onclick="toggleMobileChat()" class="md:hidden flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition text-sm">
+                    <button onclick="toggleMobileChat()" title="Toggle chat"
+                        class="flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                        </svg>
+                    </button>
+                    <button onclick="openAddToCallPicker()" title="Add people to the call"
+                        class="flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z"/></svg>
+                    </button>
+                    <button onclick="hangUp()" title="End call"
+                        class="flex items-center justify-center w-10 h-10 rounded-full bg-vc-red hover:bg-vc-red/80 text-white transition">
+                        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 9c-1.6 0-3.15.25-4.6.72v3.1c0 .39-.23.74-.56.9-.98.49-1.87 1.12-2.66 1.85-.18.18-.43.28-.7.28-.28 0-.53-.11-.71-.29L.29 13.08a.965.965 0 01-.29-.7c0-.28.11-.53.29-.71C3.34 8.78 7.46 7 12 7s8.66 1.78 11.71 4.67c.18.18.29.43.29.71 0 .28-.11.53-.29.71l-2.48 2.48c-.18.18-.43.29-.71.29-.27 0-.52-.1-.7-.28a11.27 11.27 0 00-2.67-1.85.996.996 0 01-.56-.9v-3.1C15.15 9.25 13.6 9 12 9z"/>
                         </svg>
                     </button>
                     <div class="text-xs text-vc-muted hidden md:block" id="ptt-hint">${pushToTalk ? 'Hold Space to talk' : ''}</div>
@@ -682,13 +873,64 @@ function joinChannel(channelID, channelName) {
         </div>
     `;
 
+    try { sessionStorage.setItem('vocala-in-call', String(channelID)); } catch (_) {}
+    activeCallChannelID = channelID;
+    activeCallChannelName = channelName;
+
     // Start WebRTC (TCP candidates available for mobile)
+    const isRestore = !!opts?.restore;
     startWebRTC().then(() => {
-        // Restore camera if it was on before page reload
-        if (localStorage.getItem('vocala-camera') === 'true' && !isCameraOn) {
-            startCamera();
+        if (!isRestore) return;
+        const wantCamera = localStorage.getItem('vocala-camera') === 'true' && !isCameraOn;
+        const wantScreen = localStorage.getItem('vocala-screen') === 'true' && !isScreenSharing;
+        if (wantCamera || wantScreen) {
+            showResumeMediaBanner({ camera: wantCamera, screen: wantScreen });
         }
     });
+}
+
+function showResumeMediaBanner(want) {
+    const old = document.getElementById('resume-screen-banner');
+    if (old) old.remove();
+    const banner = document.createElement('div');
+    banner.id = 'resume-screen-banner';
+    banner.className = 'fixed top-2 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 px-4 py-2 rounded-lg bg-vc-accent text-white shadow-lg text-sm';
+    const parts = [];
+    if (want.camera && want.screen) parts.push('Camera and screen were active. Resume?');
+    else if (want.camera) parts.push('Camera was active. Resume?');
+    else parts.push('Screen share was active. Resume?');
+    let btns = '';
+    if (want.camera) btns += `<button id="resume-cam-yes" class="px-3 py-1 rounded bg-white/20 hover:bg-white/30 transition">Camera</button>`;
+    if (want.screen) btns += `<button id="resume-scr-yes" class="px-3 py-1 rounded bg-white/20 hover:bg-white/30 transition">Screen</button>`;
+    btns += `<button id="resume-no" class="px-2 py-1 rounded hover:bg-white/20 transition">Dismiss</button>`;
+    banner.innerHTML = `
+        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+        </svg>
+        <span>${parts[0]}</span>
+        ${btns}
+    `;
+    document.body.appendChild(banner);
+    document.getElementById('resume-cam-yes')?.addEventListener('click', () => {
+        if (!isCameraOn) startCamera();
+        const el = document.getElementById('resume-cam-yes'); if (el) el.remove();
+        if (!document.getElementById('resume-scr-yes')) hideResumeScreenBanner();
+    });
+    document.getElementById('resume-scr-yes')?.addEventListener('click', () => {
+        if (!isScreenSharing) startScreenShare();
+        const el = document.getElementById('resume-scr-yes'); if (el) el.remove();
+        if (!document.getElementById('resume-cam-yes')) hideResumeScreenBanner();
+    });
+    document.getElementById('resume-no').addEventListener('click', () => {
+        localStorage.setItem('vocala-camera', 'false');
+        localStorage.setItem('vocala-screen', 'false');
+        hideResumeScreenBanner();
+    });
+}
+
+function hideResumeScreenBanner() {
+    const el = document.getElementById('resume-screen-banner');
+    if (el) el.remove();
 }
 
 let lastChannelUsers = [];
@@ -696,7 +938,15 @@ let lastChannelUsers = [];
 function updateMainContent(channelID, users) {
     const container = document.getElementById('channel-view-users');
     if (!container) return;
+    users = (users || []).map(u => u.Muted ? { ...u, Speaking: false } : u);
     lastChannelUsers = users;
+    if (document.body.classList.contains('expanded-tile-mode')) {
+        populateExpandedUsersRail();
+    }
+    setTimeout(() => {
+        attachUserPreviewsToCards();
+        updateCallIndicators();
+    }, 0);
 
     // Clean up camera grid for users who left
     const cameraGrid = document.getElementById('camera-grid');
@@ -727,7 +977,10 @@ function updateMainContent(channelID, users) {
     let grid = container.querySelector('.user-grid');
     if (!grid) {
         grid = document.createElement('div');
-        grid.className = 'user-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-6';
+        grid.className = 'user-grid grid gap-3 max-w-full';
+        grid.style.gridTemplateColumns = 'repeat(auto-fit, 160px)';
+        grid.style.justifyContent = 'center';
+        grid.style.alignContent = 'center';
         container.innerHTML = '';
         container.appendChild(grid);
     }
@@ -793,7 +1046,7 @@ function updateMainContent(channelID, users) {
             const card = document.createElement('div');
             card.dataset.username = u.Username;
             card.dataset.userId = u.ID;
-            card.className = `flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/50 border ${u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/20' : 'border-vc-border'} fade-in transition-all duration-200 ${lmuted ? 'opacity-50' : ''}`;
+            card.className = `relative flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/50 border ${u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/20' : 'border-vc-border'} fade-in transition-all duration-200 ${lmuted ? 'opacity-50' : ''}`;
             card.innerHTML = `
                 <div class="relative">
                     <div class="avatar-circle w-16 h-16 rounded-full ${u.Speaking ? 'ring-4 ring-vc-green/30' : ''} overflow-hidden transition-all">
@@ -819,9 +1072,28 @@ function updateMainContent(channelID, users) {
 
 function leaveChannel() {
     if (!currentChannelID) return;
+    // If we're just closing a chat-peek of a different channel while an actual
+    // call is still alive elsewhere — restore the call view, don't drop voice.
+    if (chatOnlyChannelID && activeCallChannelID && activeCallChannelID !== chatOnlyChannelID) {
+        chatOnlyChannelID = null;
+        returnToActiveCall();
+        return;
+    }
     sendWS({ type: 'leave_channel' });
     currentChannelID = null;
+    isCurrentChannelDM = false;
+    isDMHuddleActive = false;
+    chatOnlyChannelID = null;
+    outgoingCallChannelID = null;
+    outgoingCalleeUserId = null;
+    outgoingCalleeUsername = null;
+    incomingCallChannelID = null;
+    removeOutgoingPhantomCard();
+    updateCallIndicators();
+    try { sessionStorage.removeItem('vocala-in-call'); } catch (_) {}
     localStorage.setItem('vocala-camera', 'false');
+    localStorage.setItem('vocala-screen', 'false');
+    hideResumeScreenBanner();
     cleanupWebRTC();
 
     // Reset URL
@@ -870,10 +1142,56 @@ async function deleteChannel(channelId, channelName) {
     }
 }
 
+function confirmModal(message, { okText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+    return new Promise(resolve => {
+        const existing = document.getElementById('confirm-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'confirm-modal';
+        modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4';
+        modal.innerHTML = `
+            <div class="bg-vc-sidebar border border-vc-border rounded-xl shadow-xl p-5 w-full max-w-sm">
+                <div class="text-sm text-vc-text mb-5 whitespace-pre-line"></div>
+                <div class="flex justify-end gap-2">
+                    <button data-act="cancel" class="px-3 py-1.5 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text text-sm transition"></button>
+                    <button data-act="ok" class="px-3 py-1.5 rounded-lg text-white text-sm font-medium transition"></button>
+                </div>
+            </div>
+        `;
+        modal.querySelector('.whitespace-pre-line').textContent = message;
+        const okBtn = modal.querySelector('[data-act="ok"]');
+        const cancelBtn = modal.querySelector('[data-act="cancel"]');
+        okBtn.textContent = okText;
+        cancelBtn.textContent = cancelText;
+        okBtn.className += danger
+            ? ' bg-vc-red hover:bg-vc-red/80'
+            : ' bg-vc-accent hover:bg-vc-accent/80';
+
+        const done = (value) => {
+            document.removeEventListener('keydown', onKey);
+            modal.remove();
+            resolve(value);
+        };
+        const onKey = (e) => {
+            if (e.key === 'Escape') done(false);
+            else if (e.key === 'Enter') done(true);
+        };
+        okBtn.addEventListener('click', () => done(true));
+        cancelBtn.addEventListener('click', () => done(false));
+        modal.addEventListener('click', (e) => { if (e.target === modal) done(false); });
+        document.addEventListener('keydown', onKey);
+
+        document.body.appendChild(modal);
+        okBtn.focus();
+    });
+}
+
 async function toggleChannelPrivacy(channelId, channelName, currentlyPrivate) {
     const next = !currentlyPrivate;
     const verb = next ? 'private' : 'public';
-    if (!confirm('Make channel "' + channelName + '" ' + verb + '?')) return;
+    const ok = await confirmModal('Make channel "' + channelName + '" ' + verb + '?');
+    if (!ok) return;
 
     const form = new FormData();
     form.append('id', channelId);
@@ -894,9 +1212,31 @@ async function toggleChannelPrivacy(channelId, channelName, currentlyPrivate) {
 
 // ─── Mute / PTT ───────────────────────────────────────────────
 
-function toggleMute() {
-    // Can't unmute without mic access
-    if (!localStream && isMuted) return;
+async function toggleMute() {
+    if (!localStream) {
+        const useWs = (typeof USE_WS_MEDIA !== 'undefined' && USE_WS_MEDIA);
+        try {
+            if (!useWs && peerConnection) {
+                try { cleanupWebRTC(); } catch (_) {}
+            }
+            if (useWs) {
+                await startWSMedia();
+            } else {
+                await startWebRTC();
+            }
+        } catch (err) {
+            console.error('toggleMute: starter failed', err);
+            return;
+        }
+        if (localStream) {
+            isMuted = false;
+            localStorage.setItem('vocala-muted', isMuted);
+            sendWS({ type: 'mute', payload: { muted: false } });
+            if (gainNode) gainNode.gain.value = 1.0;
+            updateMuteUI();
+        }
+        return;
+    }
 
     isMuted = !isMuted;
     localStorage.setItem('vocala-muted', isMuted);
@@ -916,12 +1256,12 @@ function togglePTT() {
     const btn = document.getElementById('ptt-btn');
     const hint = document.getElementById('ptt-hint');
     if (btn) {
-        btn.className = `flex items-center gap-2 px-4 py-2 rounded-lg ${pushToTalk ? 'bg-vc-accent/20 text-vc-accent' : 'bg-vc-channel hover:bg-vc-hover text-vc-muted'} transition text-sm`;
+        btn.className = `flex items-center justify-center w-10 h-10 rounded-full ${pushToTalk ? 'bg-vc-accent/20 text-vc-accent' : 'bg-vc-channel hover:bg-vc-hover text-vc-muted'} transition`;
+        btn.title = 'Push to talk: ' + (pushToTalk ? 'ON' : 'OFF');
         btn.innerHTML = `
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
-            </svg>
-            PTT ${pushToTalk ? 'ON' : 'OFF'}`;
+            </svg>`;
     }
     if (hint) hint.textContent = pushToTalk ? 'Hold Space to talk' : '';
 
@@ -978,31 +1318,42 @@ async function loadRnnoiseNode(ctx) {
 
 async function startWebRTC() {
     try {
-        // Get microphone access
         const audioConstraints = {
             echoCancellation: true,
-            noiseSuppression: !rnnoiseEnabled,
-            autoGainControl: true,
+            noiseSuppression: !rnnoiseEnabled && noiseSuppressionEnabled,
+            autoGainControl: !rnnoiseEnabled && agcEnabled,
         };
         if (selectedMicId) audioConstraints.deviceId = { exact: selectedMicId };
         localStream = await navigator.mediaDevices.getUserMedia({
             audio: audioConstraints,
             video: false,
         });
+        hideGlobalMicWarning();
 
-        // Route audio through Web Audio API GainNode for VAD-based muting
         audioContext = new AudioContext(rnnoiseEnabled ? { sampleRate: 48000 } : undefined);
+        if (audioContext.state === 'suspended') {
+            try { await audioContext.resume(); } catch (_) {}
+        }
         const rnnoiseNode = await loadRnnoiseNode(audioContext);
         const source = audioContext.createMediaStreamSource(localStream);
+
+        let compressor = null;
+        if (rnnoiseEnabled) {
+            compressor = audioContext.createDynamicsCompressor();
+            compressor.threshold.value = -28;
+            compressor.knee.value = 20;
+            compressor.ratio.value = 4;
+            compressor.attack.value = 0.005;
+            compressor.release.value = 0.12;
+        }
+
         gainNode = audioContext.createGain();
         gainNode.gain.value = (pushToTalk || isMuted) ? 0.0 : 1.0;
         const dest = audioContext.createMediaStreamDestination();
-        if (rnnoiseNode) {
-            source.connect(rnnoiseNode);
-            rnnoiseNode.connect(gainNode);
-        } else {
-            source.connect(gainNode);
-        }
+        let head = source;
+        if (rnnoiseNode) { head.connect(rnnoiseNode); head = rnnoiseNode; }
+        if (compressor) { head.connect(compressor); head = compressor; }
+        head.connect(gainNode);
         gainNode.connect(dest);
         processedStream = dest.stream;
 
@@ -1059,9 +1410,11 @@ async function startWebRTC() {
                     // Use mid (media line ID) as stable identifier
                     const mid = event.transceiver ? event.transceiver.mid : null;
                     handleRemoteCameraTrack(stream, event.track, mid);
-                } else {
+                } else if (streamId.startsWith('screen')) {
                     // Screen share — showRemoteVideo handles dedup by stream.id
                     showRemoteVideo(stream, event.track);
+                } else {
+                    console.warn('Ignoring video track with unrecognized streamId:', streamId);
                 }
             }
         };
@@ -1157,8 +1510,10 @@ async function startWebRTC() {
                     if (streamId.startsWith('camera')) {
                         const mid = event.transceiver ? event.transceiver.mid : null;
                         handleRemoteCameraTrack(stream, event.track, mid);
-                    } else {
+                    } else if (streamId.startsWith('screen')) {
                         showRemoteVideo(stream, event.track);
+                    } else {
+                        console.warn('Ignoring video track with unrecognized streamId:', streamId);
                     }
                 }
             };
@@ -1172,7 +1527,7 @@ async function startWebRTC() {
             const offer = await peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
             sendWS({ type: 'webrtc_offer', payload: { sdp: offer.sdp } });
-            updateRTCStatusText('connected', 'Listen-only (no mic)');
+            updateRTCStatusText('connected', 'Listen-only (no mic) — tap mic to enable');
         } catch (err2) {
             console.error('Receive-only WebRTC also failed:', err2);
             updateRTCStatusText('error', 'WebRTC failed');
@@ -1198,7 +1553,8 @@ function updateMuteUI() {
     const mainText = document.getElementById('main-mute-text');
     const mainIcon = document.getElementById('main-icon-mic');
     if (mainBtn) {
-        mainBtn.className = `flex items-center gap-2 px-4 py-2 rounded-lg ${isMuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel hover:bg-vc-hover text-vc-text'} transition`;
+        mainBtn.className = `flex items-center justify-center w-10 h-10 rounded-full ${isMuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel hover:bg-vc-hover text-vc-text'} transition`;
+        mainBtn.title = isMuted ? 'Unmute' : 'Mute';
     }
     if (mainText) mainText.textContent = isMuted ? 'Unmute' : 'Mute';
     if (mainIcon) {
@@ -1297,7 +1653,6 @@ function startAdaptiveBitrate(sender, tiers, label) {
             }
             params.encodings[0].maxBitrate = tiers[idx];
             await sender.setParameters(params);
-            console.log('adaptive[' + label + ']: cap=' + Math.round(tiers[idx] / 1000) + ' kbps (tier ' + idx + ')');
         } catch (e) {
             // Sender may not be fully bound yet — just skip this tick.
         }
@@ -1345,6 +1700,8 @@ async function startScreenShare() {
             video: { cursor: 'always' },
             audio: false,
         });
+        localStorage.setItem('vocala-screen', 'true');
+        hideResumeScreenBanner();
 
         const videoTrack = screenStream.getVideoTracks()[0];
         // Tell the SFU that the next video track is a screen, not a camera —
@@ -1393,6 +1750,7 @@ async function stopScreenShare() {
     }
     screenSender = null;
     isScreenSharing = false;
+    localStorage.setItem('vocala-screen', 'false');
 
     // onnegotiationneeded will handle renegotiation after removeTrack
     removeLocalScreenPreview();
@@ -1413,6 +1771,8 @@ function addScreenTileToGrid({ id, stream, label, track }) {
     if (existing) {
         const v = existing.querySelector('video');
         if (v) {
+            try { v.pause(); } catch (_) {}
+            v.srcObject = null;
             v.srcObject = stream;
             v.play().catch(() => {});
         }
@@ -1466,12 +1826,18 @@ function addScreenTileToGrid({ id, stream, label, track }) {
 }
 
 function removeScreenTileFromGrid(id) {
+    if (expandedCamId === id) {
+        document.body.classList.remove('expanded-tile-mode');
+        expandedCamId = null;
+        clearExpandedUsersRail();
+    }
     const el = document.getElementById(id);
     if (el) {
         if (document.fullscreenElement === el) document.exitFullscreen().catch(() => {});
         el.remove();
         updateGridColumns();
     }
+    attachUserPreviewsToCards();
 }
 
 function showLocalScreenPreview(stream) {
@@ -1493,7 +1859,155 @@ function showRemoteVideo(stream, track) {
 
 let screenViewMode = 'default';
 
+function syncControlsBarHeightVar() {
+    const bar = document.querySelector('.channel-controls-bar');
+    if (!bar) return;
+    const h = bar.getBoundingClientRect().height || 92;
+    document.documentElement.style.setProperty('--controls-bar-height', h + 'px');
+}
+
+let _cameraGridObserver = null;
+function observeCameraGrid() {
+    const grid = document.getElementById('camera-grid');
+    if (!grid) return;
+    if (_cameraGridObserver) _cameraGridObserver.disconnect();
+    _cameraGridObserver = new MutationObserver(() => {
+        attachUserPreviewsToCards();
+        if (document.body.classList.contains('expanded-tile-mode')) {
+            const stillExpanded = grid.querySelector('.expanded-tile');
+            if (!stillExpanded) {
+                document.body.classList.remove('expanded-tile-mode');
+                expandedCamId = null;
+                clearExpandedUsersRail();
+                if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+            }
+        }
+    });
+    _cameraGridObserver.observe(grid, { childList: true, subtree: true });
+}
+
+function attachUserPreviewsToCards() {
+    const cards = document.querySelectorAll('#channel-view-users [data-user-id]');
+    const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
+    cards.forEach(card => {
+        const uid = card.dataset.userId;
+        const username = card.dataset.username;
+        const isSelf = username === selfName;
+        const tiles = [];
+        const tryAdd = (id, kind) => {
+            const el = document.getElementById(id);
+            if (el && el.querySelector('video')?.srcObject) tiles.push({ el, kind });
+        };
+        if (isSelf) {
+            tryAdd('local-screen-share', 'screen');
+            tryAdd('local-camera', 'camera');
+        } else {
+            tryAdd('remote-cam-screen-' + uid, 'screen');
+            tryAdd('remote-screen-share-screen-' + uid, 'screen');
+            tryAdd('remote-cam-camera-' + uid, 'camera');
+        }
+
+        let container = card.querySelector('.user-card-previews');
+        if (!container) {
+            container = document.createElement('div');
+            container.className = 'user-card-previews w-full flex gap-1 justify-center';
+            container.style.minHeight = '44px';
+            card.appendChild(container);
+        }
+
+        if (tiles.length === 0) {
+            container.innerHTML = '';
+            card.onclick = null;
+            card.style.cursor = '';
+            return;
+        }
+
+        const wantedIds = new Set(tiles.map(t => t.el.id));
+        container.querySelectorAll('[data-tile-id]').forEach(node => {
+            if (!wantedIds.has(node.dataset.tileId)) node.remove();
+        });
+
+        tiles.forEach(({ el, kind }) => {
+            const tileId = el.id;
+            let item = container.querySelector(`[data-tile-id="${tileId}"]`);
+            if (!item) {
+                item = document.createElement('div');
+                item.dataset.tileId = tileId;
+                item.className = 'relative rounded-md overflow-hidden bg-black aspect-video cursor-pointer border border-vc-border hover:border-vc-accent transition flex-shrink-0';
+                item.style.width = '72px';
+                const v = document.createElement('video');
+                v.autoplay = true;
+                v.playsInline = true;
+                v.muted = true;
+                v.className = 'w-full h-full object-cover';
+                item.appendChild(v);
+                const badge = document.createElement('div');
+                badge.className = 'absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full bg-black/70 flex items-center justify-center';
+                badge.innerHTML = kind === 'screen'
+                    ? '<svg class="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>'
+                    : '<svg class="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 10l4.5-2.3v8.6L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>';
+                item.title = kind === 'screen' ? 'View screen share' : 'View camera';
+                item.appendChild(badge);
+                item.onclick = (e) => {
+                    e.stopPropagation();
+                    setCamViewMode(tileId, 'expanded');
+                };
+                container.appendChild(item);
+            }
+            const v = item.querySelector('video');
+            const sourceVideo = el.querySelector('video');
+            if (sourceVideo && v.srcObject !== sourceVideo.srcObject) {
+                v.srcObject = sourceVideo.srcObject;
+                v.play().catch(() => {});
+            }
+        });
+
+        card.onclick = null;
+        card.style.cursor = '';
+    });
+}
+
+function populateExpandedUsersRail() {
+    const rail = document.getElementById('expanded-users-rail');
+    if (!rail) return;
+    rail.innerHTML = '';
+    const sorted = (lastChannelUsers || []).slice().sort((a, b) => {
+        if (!!b.Speaking - !!a.Speaking !== 0) return !!b.Speaking - !!a.Speaking;
+        return (a.Username || '').localeCompare(b.Username || '');
+    });
+    sorted.forEach(u => {
+        const card = document.createElement('div');
+        card.dataset.userId = u.ID;
+        const muted = u.Muted ? '<svg class="w-3 h-3 text-vc-red flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : '';
+        const speakingBars = u.Speaking
+            ? '<div class="flex items-end gap-0.5 flex-shrink-0 h-3"><div class="w-0.5 h-1.5 bg-vc-green rounded-full animate-pulse"></div><div class="w-0.5 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.1s"></div><div class="w-0.5 h-2 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.2s"></div></div>'
+            : '';
+        const ring = u.Speaking ? 'ring-2 ring-vc-green/60' : '';
+        const bg = u.Speaking ? 'bg-vc-green/10 border border-vc-green/30' : 'bg-vc-channel/60 hover:bg-vc-channel border border-transparent';
+        card.className = `flex items-center gap-2 px-2 py-1.5 rounded-md transition ${bg}`;
+        card.innerHTML = `
+            <img src="${avatarURL(u.Username)}" alt="" class="w-6 h-6 rounded-full flex-shrink-0 ${ring}">
+            <span class="text-xs text-vc-text truncate flex-1">${escapeHTML(u.Username)}</span>
+            ${speakingBars}
+            ${muted}
+        `;
+        rail.appendChild(card);
+    });
+}
+
+function clearExpandedUsersRail() {
+    const rail = document.getElementById('expanded-users-rail');
+    if (rail) rail.innerHTML = '';
+}
+
+function toggleExpandedUsersRail() {
+    const rail = document.getElementById('expanded-users-rail');
+    if (!rail) return;
+    rail.classList.toggle('rail-hidden');
+}
+
 function setScreenViewMode(mode) {
+    syncControlsBarHeightVar();
     const container = document.getElementById('screen-share-container');
     const video = document.getElementById('screen-share-video');
     if (!container || !video) return;
@@ -1508,25 +2022,42 @@ function setScreenViewMode(mode) {
     // Remove close button if exists
     const oldCloseBtn = container.querySelector('.ss-close-btn');
     if (oldCloseBtn) oldCloseBtn.remove();
+    const oldRailBtn = container.querySelector('.ss-rail-btn');
+    if (oldRailBtn) oldRailBtn.remove();
+    const oldFsBtn = container.querySelector('.ss-fs-btn');
+    if (oldFsBtn) oldFsBtn.remove();
 
     if (mode === 'default') {
+        container.classList.remove('expanded-tile');
         container.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative group';
         container.style.maxHeight = '';
         container.style.position = '';
+        container.style.top = '';
+        container.style.left = '';
+        container.style.right = '';
+        container.style.bottom = '';
         container.style.inset = '';
         container.style.zIndex = '';
         container.style.borderRadius = '';
         container.style.margin = '';
         video.className = 'w-full h-full object-contain';
         video.style.maxHeight = '70vh';
+        document.body.classList.remove('expanded-tile-mode');
+        clearExpandedUsersRail();
     } else if (mode === 'expanded') {
-        container.className = 'bg-black overflow-hidden group';
-        container.style.position = 'fixed';
-        container.style.inset = '0';
+        container.className = 'expanded-tile bg-black overflow-hidden group';
+        container.style.position = '';
+        container.style.top = '';
+        container.style.left = '';
+        container.style.right = '';
+        container.style.bottom = '';
+        container.style.inset = '';
         container.style.zIndex = '40';
         container.style.maxHeight = '';
         container.style.borderRadius = '0';
         container.style.margin = '0';
+        document.body.classList.add('expanded-tile-mode');
+        populateExpandedUsersRail();
         // Add close button
         const closeBtn = document.createElement('button');
         closeBtn.className = 'ss-close-btn absolute top-4 right-4 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
@@ -1534,29 +2065,57 @@ function setScreenViewMode(mode) {
         closeBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
         closeBtn.onclick = () => setScreenViewMode('default');
         container.appendChild(closeBtn);
+        const railBtn = document.createElement('button');
+        railBtn.className = 'ss-rail-btn absolute top-4 right-16 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
+        railBtn.title = 'Toggle participants';
+        railBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-5a4 4 0 11-8 0 4 4 0 018 0zm6 0a4 4 0 11-8 0 4 4 0 018 0z"/></svg>';
+        railBtn.onclick = (e) => { e.stopPropagation(); toggleExpandedUsersRail(); };
+        container.appendChild(railBtn);
+        const fsBtn = document.createElement('button');
+        fsBtn.className = 'ss-fs-btn absolute top-4 right-28 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
+        fsBtn.title = 'Fullscreen';
+        fsBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>';
+        fsBtn.onclick = (e) => {
+            e.stopPropagation();
+            if (document.fullscreenElement) {
+                document.exitFullscreen().catch(() => {});
+            } else {
+                setScreenViewMode('fullscreen');
+            }
+        };
+        container.appendChild(fsBtn);
+        updateFullscreenButtonsIcon();
         video.className = 'w-full h-full object-contain';
         video.style.maxHeight = '';
     } else if (mode === 'fullscreen') {
-        container.className = 'w-full bg-black rounded-xl overflow-hidden mb-4 relative group';
-        container.style.position = '';
-        container.style.inset = '';
-        container.style.zIndex = '';
-        container.style.borderRadius = '';
-        container.style.margin = '';
-        video.className = 'w-full h-full object-contain';
-        video.style.maxHeight = '';
-        if (container.requestFullscreen) {
-            container.requestFullscreen().catch(() => {});
+        if (!container.classList.contains('expanded-tile')) {
+            setScreenViewMode('expanded');
+        }
+        const target = document.getElementById('main-content') || document.documentElement;
+        if (target.requestFullscreen) {
+            target.requestFullscreen().catch(err => console.warn('fullscreen failed:', err));
+        } else if (target.webkitRequestFullscreen) {
+            target.webkitRequestFullscreen();
         }
     }
 }
 
 // Handle ESC from fullscreen
+const FS_ENTER_ICON = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>';
+const FS_EXIT_ICON = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 4l-6 6m0 0V5m0 5h5M4 20l6-6m0 0v5m0-5H5M20 20l-6-6m0 0h5m-5 0v5M4 4l6 6m0 0H5m5 0V5"/></svg>';
+
+function updateFullscreenButtonsIcon() {
+    const inFs = !!document.fullscreenElement;
+    document.querySelectorAll('.cam-fs-btn, .ss-fs-btn').forEach(btn => {
+        btn.innerHTML = inFs ? FS_EXIT_ICON : FS_ENTER_ICON;
+        btn.title = inFs ? 'Exit fullscreen' : 'Fullscreen';
+    });
+}
+
 document.addEventListener('fullscreenchange', () => {
-    if (!document.fullscreenElement && screenViewMode === 'fullscreen') {
-        setScreenViewMode('default');
-    }
+    updateFullscreenButtonsIcon();
 });
+document.addEventListener('webkitfullscreenchange', updateFullscreenButtonsIcon);
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && screenViewMode === 'expanded') {
         setScreenViewMode('default');
@@ -1577,21 +2136,18 @@ function removeRemoteVideo() {
 function updateScreenShareUI() {
     const btn = document.getElementById('screen-share-btn');
     if (!btn) return;
+    const baseIcon = `
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+        </svg>`;
     if (isScreenSharing) {
-        btn.className = 'flex items-center gap-2 px-4 py-2 rounded-lg bg-vc-green/20 text-vc-green transition';
-        btn.innerHTML = `
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-            </svg>
-            <span>Stop Sharing</span>`;
+        btn.className = 'flex items-center justify-center w-10 h-10 rounded-full bg-vc-green/20 text-vc-green transition';
+        btn.title = 'Stop sharing';
     } else {
-        btn.className = 'flex items-center gap-2 px-4 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition';
-        btn.innerHTML = `
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-            </svg>
-            <span>Share Screen</span>`;
+        btn.className = 'flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition';
+        btn.title = 'Share screen';
     }
+    btn.innerHTML = baseIcon;
 }
 
 // ─── Camera ───────────────────────────────────────────────────
@@ -1656,8 +2212,8 @@ function updateCameraUI() {
     const btn = document.getElementById('camera-btn');
     if (!btn) return;
     btn.className = isCameraOn
-        ? 'flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-green/20 text-vc-green transition text-sm'
-        : 'flex items-center gap-1.5 px-3 py-2 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text transition text-sm';
+        ? 'flex items-center justify-center w-10 h-10 rounded-full bg-vc-green/20 text-vc-green transition'
+        : 'flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition';
 }
 
 // --- Unified camera grid (local + remote) ---
@@ -1672,6 +2228,7 @@ function ensureCameraGrid() {
     grid.className = 'grid gap-3 mb-4 w-full max-w-5xl mx-auto';
     anchor.parentElement.insertBefore(grid, anchor.nextSibling);
     updateGridColumns();
+    observeCameraGrid();
 }
 
 function updateGridColumns() {
@@ -1698,7 +2255,19 @@ function updateGridColumns() {
 function addLocalCameraToGrid() {
     ensureCameraGrid();
     const grid = document.getElementById('camera-grid');
-    if (!grid || document.getElementById('local-camera')) return;
+    if (!grid) return;
+
+    const existing = document.getElementById('local-camera');
+    if (existing) {
+        const v = existing.querySelector('video');
+        if (v) {
+            try { v.pause(); } catch (_) {}
+            v.srcObject = null;
+            v.srcObject = cameraStream;
+            v.play().catch(() => {});
+        }
+        return;
+    }
 
     const wrapper = document.createElement('div');
     wrapper.id = 'local-camera';
@@ -1711,6 +2280,7 @@ function addLocalCameraToGrid() {
     video.playsInline = true;
     video.className = 'w-full h-full object-cover';
     video.style.transform = 'scaleX(-1)';
+    video.play().catch(() => {});
 
     const label = document.createElement('div');
     label.className = 'absolute bottom-2 left-2 bg-black/60 text-white text-xs px-2 py-0.5 rounded z-10';
@@ -1747,23 +2317,33 @@ function handleRemoteCameraTrack(stream, track, mid) {
 
     // stream.id = "camera-{userID}" from SFU — stable across renegotiation
     const camId = 'remote-cam-' + stream.id;
-    console.log('Camera track:', { mid, trackId: track.id, streamId: stream.id, camId });
     const existing = document.getElementById(camId);
     if (existing) {
-        const video = existing.querySelector('video');
-        if (video) {
-            video.srcObject = stream;
-            video.play().catch(() => {});
+        const prevTrackId = existing.dataset.trackId;
+        if (prevTrackId && prevTrackId !== track.id) {
+            const v = existing.querySelector('video');
+            if (v) { try { v.pause(); } catch (_) {} v.srcObject = null; }
+            existing.remove();
+        } else {
+            const video = existing.querySelector('video');
+            if (video) {
+                try { video.pause(); } catch (_) {}
+                video.srcObject = null;
+                video.srcObject = new MediaStream([track]);
+                video.play().catch(() => {});
+            }
+            existing.dataset.trackId = track.id;
+            return;
         }
-        return;
     }
 
     const wrapper = document.createElement('div');
     wrapper.id = camId;
+    wrapper.dataset.trackId = track.id;
     wrapper.className = 'rounded-xl overflow-hidden bg-black border border-vc-border aspect-video relative group cursor-pointer';
 
     const video = document.createElement('video');
-    video.srcObject = stream;
+    video.srcObject = new MediaStream([track]);
     video.autoplay = true;
     video.playsInline = true;
     video.muted = true;
@@ -1807,6 +2387,7 @@ function handleRemoteCameraTrack(stream, track, mid) {
 let expandedCamId = null;
 
 function setCamViewMode(camId, mode) {
+    syncControlsBarHeightVar();
     const wrapper = document.getElementById(camId);
     if (!wrapper) return;
 
@@ -1814,7 +2395,12 @@ function setCamViewMode(camId, mode) {
     if (expandedCamId && expandedCamId !== camId) {
         const prev = document.getElementById(expandedCamId);
         if (prev) {
+            prev.classList.remove('expanded-tile');
             prev.style.position = '';
+            prev.style.top = '';
+            prev.style.left = '';
+            prev.style.right = '';
+            prev.style.bottom = '';
             prev.style.inset = '';
             prev.style.zIndex = '';
             prev.style.borderRadius = '';
@@ -1827,7 +2413,12 @@ function setCamViewMode(camId, mode) {
     }
 
     if (mode === 'default') {
+        wrapper.classList.remove('expanded-tile');
         wrapper.style.position = '';
+        wrapper.style.top = '';
+        wrapper.style.left = '';
+        wrapper.style.right = '';
+        wrapper.style.bottom = '';
         wrapper.style.inset = '';
         wrapper.style.zIndex = '';
         wrapper.style.borderRadius = '';
@@ -1835,19 +2426,32 @@ function setCamViewMode(camId, mode) {
         wrapper.style.height = '';
         wrapper.dataset.expanded = '';
         expandedCamId = null;
+        document.body.classList.remove('expanded-tile-mode');
+        clearExpandedUsersRail();
         const video = wrapper.querySelector('video');
         if (video) video.className = 'w-full h-full object-cover';
         const closeBtn = wrapper.querySelector('.cam-close-btn');
         if (closeBtn) closeBtn.remove();
+        const railBtn = wrapper.querySelector('.cam-rail-btn');
+        if (railBtn) railBtn.remove();
+        const fsBtn = wrapper.querySelector('.cam-fs-btn');
+        if (fsBtn) fsBtn.remove();
     } else if (mode === 'expanded') {
-        wrapper.style.position = 'fixed';
-        wrapper.style.inset = '0';
+        wrapper.classList.add('expanded-tile');
+        wrapper.style.position = '';
+        wrapper.style.top = '';
+        wrapper.style.left = '';
+        wrapper.style.right = '';
+        wrapper.style.bottom = '';
+        wrapper.style.inset = '';
         wrapper.style.zIndex = '40';
         wrapper.style.borderRadius = '0';
-        wrapper.style.width = '100vw';
-        wrapper.style.height = '100vh';
+        wrapper.style.width = '';
+        wrapper.style.height = '';
         wrapper.dataset.expanded = 'true';
         expandedCamId = camId;
+        document.body.classList.add('expanded-tile-mode');
+        populateExpandedUsersRail();
         const video = wrapper.querySelector('video');
         if (video) video.className = 'w-full h-full object-contain';
         // Add close button (always visible)
@@ -1860,17 +2464,41 @@ function setCamViewMode(camId, mode) {
             closeBtn.onclick = (e) => { e.stopPropagation(); setCamViewMode(camId, 'default'); };
             wrapper.appendChild(closeBtn);
         }
+        let railBtn = wrapper.querySelector('.cam-rail-btn');
+        if (!railBtn) {
+            railBtn = document.createElement('button');
+            railBtn.className = 'cam-rail-btn absolute top-4 right-16 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
+            railBtn.title = 'Toggle participants';
+            railBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-5a4 4 0 11-8 0 4 4 0 018 0zm6 0a4 4 0 11-8 0 4 4 0 018 0z"/></svg>';
+            railBtn.onclick = (e) => { e.stopPropagation(); toggleExpandedUsersRail(); };
+            wrapper.appendChild(railBtn);
+        }
+        let fsBtn = wrapper.querySelector('.cam-fs-btn');
+        if (!fsBtn) {
+            fsBtn = document.createElement('button');
+            fsBtn.className = 'cam-fs-btn absolute top-4 right-28 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
+            fsBtn.title = 'Fullscreen';
+            fsBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>';
+            fsBtn.onclick = (e) => {
+            e.stopPropagation();
+            if (document.fullscreenElement) {
+                document.exitFullscreen().catch(() => {});
+            } else {
+                setCamViewMode(camId, 'fullscreen');
+            }
+        };
+            wrapper.appendChild(fsBtn);
+        }
+        updateFullscreenButtonsIcon();
     } else if (mode === 'fullscreen') {
-        wrapper.dataset.expanded = '';
-        expandedCamId = null;
-        wrapper.style.position = '';
-        wrapper.style.inset = '';
-        wrapper.style.zIndex = '';
-        wrapper.style.borderRadius = '';
-        wrapper.style.width = '';
-        wrapper.style.height = '';
-        if (wrapper.requestFullscreen) {
-            wrapper.requestFullscreen().catch(() => {});
+        if (!wrapper.classList.contains('expanded-tile')) {
+            setCamViewMode(camId, 'expanded');
+        }
+        const target = document.getElementById('main-content') || document.documentElement;
+        if (target.requestFullscreen) {
+            target.requestFullscreen().catch(err => console.warn('fullscreen failed:', err));
+        } else if (target.webkitRequestFullscreen) {
+            target.webkitRequestFullscreen();
         }
     }
 }
@@ -1883,6 +2511,11 @@ document.addEventListener('keydown', (e) => {
 });
 
 function removeFromCameraGrid(id) {
+    if (expandedCamId === id) {
+        document.body.classList.remove('expanded-tile-mode');
+        expandedCamId = null;
+        clearExpandedUsersRail();
+    }
     const el = document.getElementById(id);
     if (el) el.remove();
     const grid = document.getElementById('camera-grid');
@@ -1891,6 +2524,7 @@ function removeFromCameraGrid(id) {
     } else {
         updateGridColumns();
     }
+    attachUserPreviewsToCards();
 }
 
 function showScreenPreviewPlaceholder() {
@@ -1912,13 +2546,10 @@ function captureAndSendPreview() {
     sendWS({ type: 'screen_preview', payload: { image: dataUrl } });
 }
 
-function updateScreenPreviewOverlay() {
-    // No-op (see showScreenPreviewPlaceholder).
-}
-
 function cleanupWebRTC() {
-    const caller = (new Error().stack || '').split('\n')[2] || '?';
-    console.log('cleanupWebRTC: stopping all media (called from ' + caller.trim() + ')');
+    activeCallChannelID = null;
+    activeCallChannelName = null;
+    _stashedCallNodes = null;
     pendingIceCandidates = [];
     clearInterval(screenPreviewInterval);
     screenPreviewInterval = null;
@@ -2016,55 +2647,80 @@ function updateRTCStatusText(state, text) {
 function setupVAD(stream) {
     // audioContext is already created in startWebRTC
     analyser = audioContext.createAnalyser();
-    analyser.fftSize = 512;
-    analyser.smoothingTimeConstant = 0.3;
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.2;
 
     const source = audioContext.createMediaStreamSource(stream);
     source.connect(analyser);
 
-    const dataArray = new Uint8Array(analyser.frequencyBinCount);
-    let silenceCount = 0;
-    const SILENCE_DELAY = 5; // ~250ms at 50ms intervals
+    const freqBins = analyser.frequencyBinCount;
+    const sampleRate = audioContext.sampleRate;
+    const binHz = sampleRate / 2 / freqBins;
+    const speechLowBin = Math.max(1, Math.floor(150 / binHz));
+    const speechHighBin = Math.min(freqBins - 1, Math.ceil(4000 / binHz));
+    const dataArray = new Uint8Array(freqBins);
+
+    let noiseFloor = 8;            // running estimate of background noise
+    let speechHoldFrames = 0;      // keep gate open this many frames after speech
+    const HOLD_FRAMES = 12;        // ~600ms tail so word-endings aren't cut
+    const RATIO_OPEN = 2.2;        // open gate when energy > noise * this
+    const RATIO_CLOSE = 1.4;       // close when below this (hysteresis)
+    let gateOpen = false;
+    let smoothedGain = 0;
+
+    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
     vadInterval = setInterval(() => {
         analyser.getByteFrequencyData(dataArray);
-        let sum = 0;
-        for (let i = 0; i < dataArray.length; i++) {
-            sum += dataArray[i];
-        }
-        currentVadLevel = sum / dataArray.length;
 
-        // Update level meter
+        let total = 0;
+        for (let i = 0; i < freqBins; i++) total += dataArray[i];
+        currentVadLevel = total / freqBins;
+
+        let speech = 0;
+        for (let i = speechLowBin; i <= speechHighBin; i++) speech += dataArray[i];
+        speech /= (speechHighBin - speechLowBin + 1);
+
+        if (!gateOpen) {
+            noiseFloor += (speech - noiseFloor) * 0.05;
+        } else {
+            noiseFloor += Math.min(0, speech - noiseFloor) * 0.05;
+        }
+        noiseFloor = Math.max(1, noiseFloor);
+
+        const manual = Math.max(2, vadThreshold);
+        const openThresh = Math.max(manual, noiseFloor * RATIO_OPEN);
+        const closeThresh = Math.max(manual * 0.7, noiseFloor * RATIO_CLOSE);
+
         const meter = document.getElementById('vad-meter');
         if (meter) {
             const pct = Math.min(100, (currentVadLevel / 80) * 100);
             meter.style.width = pct + '%';
-            meter.className = `h-full rounded-full transition-all duration-75 ${currentVadLevel > vadThreshold ? 'bg-vc-green' : 'bg-vc-muted/50'}`;
+            meter.className = `h-full rounded-full transition-all duration-75 ${gateOpen ? 'bg-vc-green' : 'bg-vc-muted/50'}`;
         }
 
-        if (isMuted || (pushToTalk && !pttActive)) return;
-
-        const voiceDetected = currentVadLevel > vadThreshold;
-
-        if (voiceDetected) {
-            silenceCount = 0;
-            if (gainNode) gainNode.gain.value = 1.0;
-            if (!isSpeaking) {
-                isSpeaking = true;
-                sendWS({ type: 'speaking', payload: { speaking: true } });
-                updateSelfSpeakingUI(true);
-            }
-        } else {
-            silenceCount++;
-            if (silenceCount >= SILENCE_DELAY) {
-                if (gainNode && !pushToTalk) gainNode.gain.value = 0.0;
-                if (isSpeaking) {
-                    isSpeaking = false;
-                    sendWS({ type: 'speaking', payload: { speaking: false } });
-                    updateSelfSpeakingUI(false);
-                }
-            }
+        if (isMuted || (pushToTalk && !pttActive)) {
+            return;
         }
+
+        if (speech > openThresh) {
+            gateOpen = true;
+            speechHoldFrames = HOLD_FRAMES;
+        } else if (speech < closeThresh && speechHoldFrames === 0) {
+            gateOpen = false;
+        }
+        if (gateOpen && speech <= openThresh) speechHoldFrames--;
+
+        const target = gateOpen ? 1.0 : (rnnoiseEnabled ? 0.15 : 0.0);
+        smoothedGain += (target - smoothedGain) * (target > smoothedGain ? 0.6 : 0.25);
+        if (gainNode) gainNode.gain.value = Math.max(0, Math.min(1, smoothedGain));
+
+        if (gateOpen !== isSpeaking) {
+            isSpeaking = gateOpen;
+            sendWS({ type: 'speaking', payload: { speaking: isSpeaking } });
+            updateSelfSpeakingUI(isSpeaking);
+        }
+        void isIOS;
     }, 50);
 }
 
@@ -2141,23 +2797,50 @@ if (selfAvatar && selfAvatar.dataset.username) {
 
 connectWS();
 checkMicPermission();
+if (!window.VOCALA_GUEST_CHANNEL) {
+    loadDMList();
+    loadGroupList();
+    setInterval(() => { loadDMList(); loadGroupList(); }, 30000);
+}
 // Notification.requestPermission() must be called from a user gesture —
 // Firefox blocks it otherwise. Defer to the first click on the page.
 document.addEventListener('click', requestNotificationPermission, { once: true, capture: true });
 
+function reconnectIfNeeded() {
+    if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+        reconnectAttempts = 0;
+        connectWS();
+    }
+}
+
+let cameraWasOnBeforeHidden = false;
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        cameraWasOnBeforeHidden = !!isCameraOn;
+    } else {
+        reconnectIfNeeded();
+        if (cameraWasOnBeforeHidden && !isCameraOn) {
+            cameraWasOnBeforeHidden = false;
+            setTimeout(() => {
+                if (peerConnection && !isCameraOn) {
+                    startCamera().catch(err => console.warn('camera resume failed:', err));
+                }
+            }, 600);
+        }
+    }
+});
+window.addEventListener('focus', reconnectIfNeeded);
+window.addEventListener('online', reconnectIfNeeded);
+window.addEventListener('pageshow', reconnectIfNeeded);
+
 async function checkMicPermission() {
+    if (!navigator.permissions || typeof navigator.permissions.query !== 'function') {
+        return;
+    }
     try {
         const result = await navigator.permissions.query({ name: 'microphone' });
         if (result.state === 'denied') {
             showGlobalMicWarning();
-        } else if (result.state === 'prompt') {
-            // Proactively request mic access so the browser shows the permission prompt
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                stream.getTracks().forEach(t => t.stop());
-            } catch (e) {
-                showGlobalMicWarning();
-            }
         }
         result.addEventListener('change', () => {
             if (result.state === 'denied') {
@@ -2167,13 +2850,6 @@ async function checkMicPermission() {
             }
         });
     } catch (e) {
-        // permissions.query not supported, try getUserMedia directly
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            stream.getTracks().forEach(t => t.stop());
-        } catch (err) {
-            showGlobalMicWarning();
-        }
     }
 }
 
@@ -2204,6 +2880,925 @@ function hideGlobalMicWarning() {
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '👏', '🔥'];
 
+function sendVoiceReaction(emoji) {
+    sendWS({ type: 'voice_reaction', payload: { emoji } });
+}
+
+function handleStaleChannel() {
+    document.getElementById('member-modal')?.remove();
+    document.getElementById('settings-modal')?.remove();
+    if (currentChannelID) {
+        sendWS({ type: 'leave_channel' });
+        currentChannelID = null;
+        cleanupWebRTC();
+    }
+    history.pushState({}, '', '/');
+    const mc = document.getElementById('main-content');
+    if (mc) mc.innerHTML = '<div class="flex-1 flex items-center justify-center text-vc-muted text-sm">This channel no longer exists.</div>';
+    showToast('Channel no longer exists');
+}
+
+function showToast(text) {
+    const t = document.createElement('div');
+    t.className = 'fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-vc-sidebar border border-vc-border shadow-lg text-sm text-vc-text';
+    t.textContent = text;
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.transition = 'opacity 0.4s'; t.style.opacity = '0'; }, 2600);
+    setTimeout(() => t.remove(), 3100);
+}
+
+function showDoubleLoginBanner() {
+    if (document.getElementById('double-login-banner')) return;
+    const banner = document.createElement('div');
+    banner.id = 'double-login-banner';
+    banner.className = 'fixed top-0 inset-x-0 z-50 bg-vc-red/90 text-white px-4 py-3 text-sm flex items-center justify-center gap-3 shadow-lg';
+    banner.innerHTML = `
+        <span>You signed in from another window. This tab has been disconnected.</span>
+        <button class="px-3 py-1 rounded bg-white/20 hover:bg-white/30 transition">Reconnect here</button>
+    `;
+    banner.querySelector('button').addEventListener('click', () => {
+        banner.remove();
+        wsBouncedOut = false;
+        wsRapidBounceCount = 0;
+        reconnectAttempts = 0;
+        connectWS();
+    });
+    document.body.appendChild(banner);
+}
+
+function startHuddle(toUserId) {
+    outgoingCalleeUserId = toUserId;
+    const dmRow = document.querySelector(`#dm-list [data-other-id="${toUserId}"]`);
+    outgoingCalleeUsername = dmRow ? (dmRow.querySelector('.dm-name')?.textContent || '') : '';
+    sendWS({ type: 'huddle_invite', payload: { to_user_id: toUserId } });
+    showToast('Calling…');
+}
+
+
+async function loadGroupList() {
+    try {
+        const res = await fetch('/api/groups');
+        if (!res.ok) return;
+        const list = await res.json();
+        renderGroupList(list || []);
+    } catch (err) {
+        console.error('loadGroupList failed', err);
+    }
+}
+
+let _loadDMListTimer = null;
+let _loadGroupListTimer = null;
+function loadDMListDebounced() {
+    if (_loadDMListTimer) return;
+    _loadDMListTimer = setTimeout(() => { _loadDMListTimer = null; loadDMList(); }, 400);
+}
+function loadGroupListDebounced() {
+    if (_loadGroupListTimer) return;
+    _loadGroupListTimer = setTimeout(() => { _loadGroupListTimer = null; loadGroupList(); }, 400);
+}
+
+function renderGroupList(items) {
+    const root = document.getElementById('group-list');
+    const section = document.getElementById('group-section');
+    if (!root) return;
+    if (!items.length) {
+        root.innerHTML = '';
+        if (section) section.classList.add('hidden');
+        return;
+    }
+    if (section) section.classList.remove('hidden');
+    root.innerHTML = '';
+    items.forEach(g => {
+        const active = currentChannelID === g.ID ? 'bg-vc-hover/60' : 'hover:bg-vc-hover';
+        const row = document.createElement('div');
+        row.className = `flex items-center gap-2 px-2 py-1.5 rounded-lg ${active} transition cursor-pointer`;
+        row.dataset.groupChannel = String(g.ID);
+        row.innerHTML = `
+            <div class="w-7 h-7 rounded-lg bg-vc-channel flex items-center justify-center flex-shrink-0">
+                <svg class="w-4 h-4 text-vc-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a4 4 0 00-3-3.87M9 20H4v-2a4 4 0 013-3.87m6-5a4 4 0 11-8 0 4 4 0 018 0zm6 0a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+            </div>
+            <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium text-vc-text truncate"></div>
+            </div>
+        `;
+        row.querySelector('.flex-1 > div').textContent = g.Name;
+        row.addEventListener('click', () => openGroupChannel(g.ID, g.Name));
+        root.appendChild(row);
+    });
+    const ids = items.map(g => g.ID);
+    if (ids.length > 0) sendWS({ type: 'watch_channels', payload: { channel_ids: ids } });
+}
+
+function openGroupChannel(channelId, name) {
+    // Match DM behaviour: clicking a Group opens chat-only first; the user can
+    // then press the Huddle button in the header to start/join the call. If
+    // they're already voice-joined to this group, joinChannel will restore
+    // the live call view.
+    joinChannel(channelId, name, { chatOnly: true });
+}
+
+async function loadDMList() {
+    try {
+        const res = await fetch('/api/dms');
+        if (!res.ok) return;
+        const list = await res.json();
+        renderDMList(list || []);
+    } catch (err) {
+        console.error('loadDMList failed', err);
+    }
+}
+
+function dmRelativeTime(ts) {
+    if (!ts) return '';
+    const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h';
+    if (diff < 86400 * 7) return Math.floor(diff / 86400) + 'd';
+    return new Date(ts * 1000).toLocaleDateString();
+}
+
+function renderDMList(items) {
+    const root = document.getElementById('dm-list');
+    if (!root) return;
+    items.forEach(d => {
+        dmChannelIds.add(d.channel_id);
+        if (typeof d.unread_count === 'number') {
+            if (d.unread_count > 0) dmUnread.set(d.channel_id, d.unread_count);
+            else dmUnread.delete(d.channel_id);
+        }
+    });
+    persistDMUnread();
+    if (!items.length) {
+        root.innerHTML = '<div class="text-center text-vc-muted text-xs py-2">No conversations yet</div>';
+        return;
+    }
+    root.innerHTML = '';
+    items.forEach(d => {
+        const active = currentChannelID === d.channel_id ? 'bg-vc-hover/60' : 'hover:bg-vc-hover';
+        const row = document.createElement('div');
+        row.className = `group flex items-center gap-2 px-2 py-1.5 rounded-lg ${active} transition cursor-pointer`;
+        row.dataset.dmChannel = String(d.channel_id);
+        row.dataset.otherId = String(d.other_user_id);
+        row.innerHTML = `
+            <img src="${avatarURL(d.other_name)}" alt="" class="w-7 h-7 rounded-full flex-shrink-0">
+            <div class="flex-1 min-w-0">
+                <div class="dm-name text-sm font-medium text-vc-text truncate"></div>
+            </div>
+            <button title="Start huddle" class="dm-huddle-btn invisible group-hover:visible text-vc-muted hover:text-vc-accent transition flex-shrink-0">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/></svg>
+            </button>
+        `;
+        row.querySelector('.dm-name').textContent = d.other_name;
+        row.addEventListener('click', () => openDMChannel(d.channel_id, d.other_name));
+        const huddleBtn = row.querySelector('.dm-huddle-btn');
+        if (huddleBtn) {
+            huddleBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                startHuddle(d.other_user_id);
+            });
+        }
+        root.appendChild(row);
+    });
+    updateCallIndicators();
+    updateGlobalUnreadFavicon();
+    const ids = items.map(d => d.channel_id);
+    if (ids.length > 0) {
+        sendWS({ type: 'watch_channels', payload: { channel_ids: ids } });
+    }
+}
+
+const dmChannelIds = new Set();
+
+const dmUnread = (() => {
+    try {
+        return new Map(Object.entries(JSON.parse(localStorage.getItem('vocala-dm-unread') || '{}')).map(([k, v]) => [parseInt(k, 10), v | 0]));
+    } catch (_) {
+        return new Map();
+    }
+})();
+
+function persistDMUnread() {
+    try {
+        const obj = {};
+        for (const [k, v] of dmUnread) {
+            if (v > 0) obj[k] = v;
+        }
+        localStorage.setItem('vocala-dm-unread', JSON.stringify(obj));
+    } catch (_) {}
+}
+
+function bumpDMUnread(channelID) {
+    if (!dmChannelIds.has(channelID)) return;
+    if (currentChannelID === channelID && document.visibilityState !== 'hidden') return;
+    dmUnread.set(channelID, (dmUnread.get(channelID) || 0) + 1);
+    persistDMUnread();
+    updateCallIndicators();
+    updateGlobalUnreadFavicon();
+}
+
+function clearDMUnread(channelID) {
+    if (!dmUnread.has(channelID)) return;
+    dmUnread.delete(channelID);
+    persistDMUnread();
+    updateCallIndicators();
+    updateGlobalUnreadFavicon();
+}
+
+function updateCallIndicators() {
+    updateDMUnreadIndicators();
+    updateUserCardCallIndicators();
+    syncOutgoingPhantomCard();
+    updateActiveHuddleBadges();
+}
+
+function dmHasActiveHuddle(channelID) {
+    const selfName = document.getElementById('self-avatar')?.dataset?.username;
+    const users = channelUsersData[channelID] || [];
+    return users.some(u => u.Username !== selfName);
+}
+
+function rejoinActiveHuddle(channelID, displayName) {
+    isDMHuddleActive = true;
+    currentChannelID = null;
+    joinChannel(channelID, displayName, { forceHuddle: true });
+}
+
+function updateActiveHuddleBadges() {
+    document.querySelectorAll('#dm-list [data-dm-channel]').forEach(row => {
+        const id = parseInt(row.dataset.dmChannel, 10);
+        let badge = row.querySelector('.dm-active-huddle');
+        const hasCallBadge = !!row.querySelector('.dm-call-badge');
+        if (dmHasActiveHuddle(id) && !hasCallBadge) {
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'dm-active-huddle flex-shrink-0 inline-flex items-center justify-center w-[20px] h-[20px] rounded-full bg-vc-green text-white animate-pulse';
+                badge.title = 'Active huddle';
+                badge.innerHTML = '<svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79a15.5 15.5 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24 11.4 11.4 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.4 11.4 0 00.57 3.57 1 1 0 01-.24 1.02l-2.21 2.2z"/></svg>';
+                row.insertBefore(badge, row.querySelector('button'));
+            }
+        } else if (badge) {
+            badge.remove();
+        }
+    });
+    if (isCurrentChannelDM && !isDMHuddleActive && currentChannelID) {
+        const huddleBtn = document.querySelector('#main-content [data-dm-huddle-btn]');
+        const banner = document.getElementById('active-huddle-banner');
+        const active = dmHasActiveHuddle(currentChannelID);
+        if (active) {
+            if (huddleBtn && !huddleBtn.dataset.rejoinWired) {
+                huddleBtn.dataset.rejoinWired = '1';
+                huddleBtn.dataset.originalOnclick = huddleBtn.getAttribute('onclick') || '';
+                huddleBtn.removeAttribute('onclick');
+                huddleBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const dmRow = document.querySelector(`#dm-list [data-dm-channel="${currentChannelID}"]`);
+                    const name = dmRow ? (dmRow.querySelector('.dm-name')?.textContent || '') : '';
+                    rejoinActiveHuddle(currentChannelID, name);
+                };
+            }
+            if (huddleBtn) {
+                huddleBtn.classList.add('bg-vc-green', 'hover:bg-vc-green/80');
+                huddleBtn.classList.remove('bg-vc-accent', 'hover:bg-vc-accent/80');
+                const label = huddleBtn.querySelector('span');
+                if (label) label.textContent = 'Rejoin huddle';
+                huddleBtn.title = 'Rejoin the active huddle';
+            }
+            if (!banner) {
+                const header = document.querySelector('#main-content > div > div:first-child');
+                if (header) {
+                    const b = document.createElement('div');
+                    b.id = 'active-huddle-banner';
+                    b.className = 'flex items-center gap-2 px-4 md:px-6 py-2 bg-vc-green/15 border-b border-vc-green/30 text-sm cursor-pointer';
+                    b.innerHTML = `
+                        <svg class="w-4 h-4 text-vc-green animate-pulse" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79a15.5 15.5 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24 11.4 11.4 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.4 11.4 0 00.57 3.57 1 1 0 01-.24 1.02l-2.21 2.2z"/></svg>
+                        <span class="text-vc-green flex-1">Huddle in progress</span>
+                        <button class="px-3 py-1 text-xs rounded-md bg-vc-green text-white hover:bg-vc-green/80 transition">Rejoin</button>
+                    `;
+                    const doRejoin = (e) => {
+                        e.stopPropagation();
+                        const dmRow = document.querySelector(`#dm-list [data-dm-channel="${currentChannelID}"]`);
+                        const name = dmRow ? (dmRow.querySelector('.dm-name')?.textContent || '') : '';
+                        rejoinActiveHuddle(currentChannelID, name);
+                    };
+                    b.querySelector('button').onclick = doRejoin;
+                    b.onclick = doRejoin;
+                    header.insertAdjacentElement('afterend', b);
+                }
+            }
+        } else {
+            if (huddleBtn && huddleBtn.dataset.rejoinWired) {
+                delete huddleBtn.dataset.rejoinWired;
+                const orig = huddleBtn.dataset.originalOnclick;
+                if (orig) huddleBtn.setAttribute('onclick', orig);
+                huddleBtn.onclick = null;
+            }
+            if (huddleBtn) {
+                huddleBtn.classList.remove('bg-vc-green', 'hover:bg-vc-green/80');
+                huddleBtn.classList.add('bg-vc-accent', 'hover:bg-vc-accent/80');
+                const label = huddleBtn.querySelector('span');
+                if (label) label.textContent = 'Huddle';
+                huddleBtn.title = 'Start huddle';
+            }
+            if (banner) banner.remove();
+        }
+    }
+}
+
+function syncOutgoingPhantomCard() {
+    const grid = document.querySelector('#channel-view-users .user-grid');
+    const existing = document.getElementById('outgoing-call-phantom');
+    if (!outgoingCalleeUserId || !grid) {
+        if (existing) existing.remove();
+        return;
+    }
+    const real = grid.querySelector(`[data-user-id="${outgoingCalleeUserId}"]`);
+    if (real) {
+        if (existing) existing.remove();
+        return;
+    }
+    const name = outgoingCalleeUsername || 'User';
+    if (existing) {
+        const nameEl = existing.querySelector('.user-name');
+        if (nameEl) nameEl.textContent = name;
+        return;
+    }
+    const card = document.createElement('div');
+    card.id = 'outgoing-call-phantom';
+    card.className = 'flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/40 border border-vc-accent/40 transition-all duration-200';
+    card.innerHTML = `
+        <div class="relative">
+            <div class="avatar-circle w-16 h-16 rounded-full overflow-hidden transition-all ring-2 ring-vc-accent/40 animate-pulse">
+                <img src="${avatarURL(name)}" alt="" class="w-full h-full">
+            </div>
+            <div class="absolute -top-1 -left-1 w-6 h-6 rounded-full bg-vc-accent flex items-center justify-center border-2 border-vc-bg shadow-md animate-pulse">
+                <svg class="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79a15.5 15.5 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24 11.4 11.4 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.4 11.4 0 00.57 3.57 1 1 0 01-.24 1.02l-2.21 2.2z"/></svg>
+            </div>
+        </div>
+        <span class="user-name text-sm font-medium text-vc-text">${escapeHTML(name)}</span>
+        <span class="text-[11px] text-vc-accent">Calling…</span>
+        <div class="speaking-spacer h-5"></div>
+    `;
+    grid.appendChild(card);
+}
+
+function removeOutgoingPhantomCard() {
+    const el = document.getElementById('outgoing-call-phantom');
+    if (el) el.remove();
+}
+
+function updateUserCardCallIndicators() {
+    document.querySelectorAll('#channel-view-users [data-user-id]').forEach(card => {
+        const uid = parseInt(card.dataset.userId, 10);
+        let dmCh = 0;
+        const dmRow = document.querySelector(`#dm-list [data-other-id="${uid}"]`);
+        if (dmRow) dmCh = parseInt(dmRow.dataset.dmChannel, 10) || 0;
+        const incoming = dmCh && incomingCallChannelID === dmCh;
+        const outgoing = dmCh && outgoingCallChannelID === dmCh;
+
+        const avatarWrap = card.querySelector('.relative');
+        if (!avatarWrap) return;
+        let badge = avatarWrap.querySelector('.card-call-badge');
+        if (incoming || outgoing) {
+            if (!badge) {
+                badge = document.createElement('div');
+                badge.className = 'card-call-badge absolute -top-1 -left-1 w-6 h-6 rounded-full flex items-center justify-center border-2 border-vc-bg shadow-md';
+                avatarWrap.appendChild(badge);
+            }
+            const bg = incoming ? 'bg-vc-green' : 'bg-vc-accent';
+            badge.className = `card-call-badge absolute -top-1 -left-1 w-6 h-6 rounded-full flex items-center justify-center border-2 border-vc-bg shadow-md ${bg} animate-pulse`;
+            badge.title = incoming ? 'Incoming call' : 'Calling…';
+            badge.innerHTML = '<svg class="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79a15.5 15.5 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24 11.4 11.4 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.4 11.4 0 00.57 3.57 1 1 0 01-.24 1.02l-2.21 2.2z"/></svg>';
+        } else if (badge) {
+            badge.remove();
+        }
+    });
+}
+
+function updateDMUnreadIndicators() {
+    document.querySelectorAll('#dm-list [data-dm-channel]').forEach(row => {
+        const id = parseInt(row.dataset.dmChannel, 10);
+        const count = dmUnread.get(id) || 0;
+        const nameEl = row.querySelector('.dm-name');
+        const incoming = incomingCallChannelID === id;
+        const outgoing = outgoingCallChannelID === id;
+        let callBadge = row.querySelector('.dm-call-badge');
+        if (incoming || outgoing) {
+            if (!callBadge) {
+                callBadge = document.createElement('span');
+                callBadge.className = 'dm-call-badge flex-shrink-0 inline-flex items-center justify-center w-[20px] h-[20px] rounded-full text-[11px]';
+                row.insertBefore(callBadge, row.querySelector('button'));
+            }
+            const color = incoming ? 'bg-vc-green text-white animate-pulse' : 'bg-vc-accent text-white animate-pulse';
+            callBadge.className = `dm-call-badge flex-shrink-0 inline-flex items-center justify-center w-[20px] h-[20px] rounded-full text-[11px] ${color}`;
+            callBadge.title = incoming ? 'Incoming call' : 'Calling…';
+            callBadge.innerHTML = '<svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79a15.5 15.5 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24 11.4 11.4 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.4 11.4 0 00.57 3.57 1 1 0 01-.24 1.02l-2.21 2.2z"/></svg>';
+        } else if (callBadge) {
+            callBadge.remove();
+        }
+        let badge = row.querySelector('.dm-unread-badge');
+        if (count > 0) {
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'dm-unread-badge flex-shrink-0 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-vc-accent text-white text-[10px] font-semibold';
+                row.insertBefore(badge, row.querySelector('button'));
+            }
+            badge.textContent = count > 99 ? '99+' : String(count);
+            if (nameEl) nameEl.classList.add('font-semibold', 'text-vc-text');
+        } else {
+            if (badge) badge.remove();
+            if (nameEl) nameEl.classList.remove('font-semibold');
+        }
+    });
+}
+
+function updateGlobalUnreadFavicon() {
+    let total = 0;
+    for (const v of dmUnread.values()) total += v;
+    const base = 'Vocala';
+    document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${base}` : base;
+}
+
+function openDMChannel(channelId, otherName) {
+    dmChannelIds.add(channelId);
+    clearDMUnread(channelId);
+    joinChannel(channelId, otherName, { isDM: true });
+}
+
+function renderDMChatOnly(channelID, displayName) {
+    renderChannelChatOnly(channelID, displayName, { isDM: true });
+}
+
+function renderChannelChatOnly(channelID, displayName, opts) {
+    const mainContent = document.getElementById('main-content');
+    if (!mainContent) return;
+    const isDM = !!opts?.isDM;
+    let otherUserId = 0;
+    if (isDM) {
+        const dmRow = document.querySelector(`#dm-list [data-dm-channel="${channelID}"]`);
+        if (dmRow) otherUserId = parseInt(dmRow.dataset.otherId, 10) || 0;
+    }
+    const safeName = escapeHTML(displayName || (isDM ? 'Direct message' : 'Channel'));
+    const huddleBtn = isDM && otherUserId
+        ? `<button data-dm-huddle-btn onclick="startDMHuddle(${channelID}, ${otherUserId}, '${safeName.replace(/'/g, "\\'")}')" class="flex items-center gap-1.5 px-3 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-xs md:text-sm rounded-lg transition" title="Start huddle">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/></svg>
+            <span>Huddle</span>
+        </button>`
+        : `<button data-dm-huddle-btn onclick="joinChannelHuddle(${channelID}, '${safeName.replace(/'/g, "\\'")}')" class="flex items-center gap-1.5 px-3 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-xs md:text-sm rounded-lg transition" title="Join huddle">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/></svg>
+            <span>Join huddle</span>
+        </button>`;
+    const avatar = isDM
+        ? `<img src="${avatarURL(displayName || 'dm')}" class="w-8 h-8 rounded-full flex-shrink-0">`
+        : `<svg class="w-6 h-6 text-vc-accent flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>`;
+    const returnPill = (activeCallChannelID && activeCallChannelID !== channelID)
+        ? `<button onclick="returnToActiveCall()" class="flex items-center gap-1.5 px-3 py-1.5 bg-vc-green/20 hover:bg-vc-green/30 text-vc-green text-xs md:text-sm rounded-lg transition" title="Return to your call">
+            <span class="w-2 h-2 rounded-full bg-vc-green animate-pulse"></span>
+            <span>Return to call</span>
+        </button>`
+        : '';
+    mainContent.innerHTML = `
+        <div class="w-full h-full flex flex-col">
+            <div class="px-4 md:px-6 py-3 border-b border-vc-border flex items-center gap-3">
+                ${avatar}
+                <h2 class="text-base md:text-xl font-bold truncate flex-1">${safeName}</h2>
+                ${returnPill}
+                ${huddleBtn}
+                <button onclick="leaveChannel()" class="px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-muted hover:text-vc-text text-xs md:text-sm rounded-lg transition" title="Close">
+                    Close
+                </button>
+            </div>
+            <div class="flex-1 flex flex-col overflow-hidden">
+                <div id="chat-messages" class="flex-1 overflow-y-auto p-3 space-y-1 min-h-0"></div>
+                <div class="p-3 border-t border-vc-border">
+                    <form onsubmit="sendChatMessage(event)" class="flex gap-2">
+                        <input type="text" id="chat-input" placeholder="Message ${safeName}…" autocomplete="off"
+                            class="flex-1 px-3 py-2 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition">
+                        <button type="submit" class="px-3 py-2 bg-vc-accent hover:bg-vc-accent/80 text-white rounded-lg transition">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"/>
+                            </svg>
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    `;
+    setTimeout(updateActiveHuddleBadges, 0);
+}
+
+function joinChannelHuddle(channelID, displayName) {
+    chatOnlyChannelID = null;
+    currentChannelID = null;
+    joinChannel(channelID, displayName, { forceHuddle: true });
+}
+
+// _stashedCallNodes holds the detached call-view DOM while the user peeks
+// another channel's chat. Stored in a JS var (not in the live document) so
+// getElementById doesn't see duplicate IDs.
+let _stashedCallNodes = null;
+
+function stashCallView() {
+    const main = document.getElementById('main-content');
+    if (!main) return;
+    const frag = document.createDocumentFragment();
+    while (main.firstChild) frag.appendChild(main.firstChild);
+    _stashedCallNodes = frag;
+}
+
+// returnToActiveCall restores the cached call-view DOM. Used when the user
+// clicks back into the channel they're actively voice-joined to.
+function returnToActiveCall() {
+    if (!activeCallChannelID) return;
+    currentChannelID = activeCallChannelID;
+    chatOnlyChannelID = null;
+    isCurrentChannelDM = !!(activeCallChannelName && /^dm-\d+-\d+$/.test(activeCallChannelName)) || dmChannelIds.has(activeCallChannelID);
+    isDMHuddleActive = isCurrentChannelDM;
+    const main = document.getElementById('main-content');
+    if (main && _stashedCallNodes) {
+        main.innerHTML = '';
+        main.appendChild(_stashedCallNodes);
+        _stashedCallNodes = null;
+    }
+    document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('bg-vc-hover/50'));
+    const item = document.querySelector(`[data-channel-id="${activeCallChannelID}"]`);
+    if (item) item.classList.add('bg-vc-hover/50');
+    if (!window.VOCALA_GUEST_CHANNEL && activeCallChannelName) {
+        history.pushState({ channelID: activeCallChannelID, channelName: activeCallChannelName }, '', '/channels/' + encodeURIComponent(activeCallChannelName));
+    }
+    const mobileChName = document.getElementById('mobile-channel-name');
+    if (mobileChName && activeCallChannelName) mobileChName.textContent = activeCallChannelName;
+}
+
+async function openAddToCallPicker() {
+    if (!currentChannelID) return;
+    try {
+        const res = await fetch('/api/users');
+        const users = await res.json();
+        const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
+        const presentIds = new Set((lastChannelUsers || []).map(u => u.ID));
+        const candidates = (users || []).filter(u => u.username !== selfName && !presentIds.has(u.id));
+
+        document.getElementById('add-to-call-picker')?.remove();
+        const modal = document.createElement('div');
+        modal.id = 'add-to-call-picker';
+        modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4';
+        modal.innerHTML = `
+            <div class="bg-vc-sidebar border border-vc-border rounded-xl shadow-2xl w-80 max-h-[70vh] flex flex-col">
+                <div class="flex items-center justify-between px-4 py-3 border-b border-vc-border">
+                    <h3 class="text-sm font-bold text-vc-text">Add to call</h3>
+                    <button onclick="document.getElementById('add-to-call-picker').remove()" class="text-vc-muted hover:text-vc-text transition">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                </div>
+                <input id="add-to-call-search" type="text" placeholder="Search…" autocomplete="off"
+                    class="m-3 px-3 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition">
+                <div id="add-to-call-list" class="flex-1 overflow-y-auto px-2 pb-2 space-y-1"></div>
+                <div class="px-3 py-2 border-t border-vc-border flex justify-end">
+                    <button id="add-to-call-invite" disabled
+                        class="px-3 py-1.5 rounded-lg bg-vc-accent hover:bg-vc-accent/80 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium transition">Invite</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+
+        const listEl = document.getElementById('add-to-call-list');
+        const inviteBtn = document.getElementById('add-to-call-invite');
+        const selected = new Set();
+        const updateInvite = () => { inviteBtn.disabled = selected.size === 0; };
+        const render = (q) => {
+            q = (q || '').toLowerCase().trim();
+            const matches = candidates.filter(u => !q || u.username.toLowerCase().includes(q));
+            if (matches.length === 0) {
+                listEl.innerHTML = '<div class="text-center text-vc-muted text-xs py-3">No users to add</div>';
+                return;
+            }
+            listEl.innerHTML = matches.map(u => `
+                <label class="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-vc-hover transition cursor-pointer">
+                    <input type="checkbox" data-uid="${u.id}" ${selected.has(u.id) ? 'checked' : ''}
+                        class="rounded border-vc-border text-vc-accent focus:ring-vc-accent">
+                    <img src="${avatarURL(u.username)}" class="w-6 h-6 rounded-full">
+                    <span class="text-sm text-vc-text">${escapeHTML(u.username)}</span>
+                </label>
+            `).join('');
+            listEl.querySelectorAll('input[type=checkbox]').forEach(cb => {
+                cb.addEventListener('change', () => {
+                    const id = parseInt(cb.dataset.uid, 10);
+                    if (cb.checked) selected.add(id); else selected.delete(id);
+                    updateInvite();
+                });
+            });
+        };
+        render('');
+        document.getElementById('add-to-call-search').addEventListener('input', (e) => render(e.target.value));
+        inviteBtn.addEventListener('click', () => {
+            const ids = Array.from(selected);
+            if (ids.length === 0) return;
+            sendWS({ type: 'huddle_invite_others', payload: { user_ids: ids } });
+            modal.remove();
+            showToast(ids.length === 1 ? 'Inviting…' : `Inviting ${ids.length} people…`);
+        });
+    } catch (err) {
+        console.error('openAddToCallPicker failed', err);
+    }
+}
+
+function hangUp() {
+    const ch = currentChannelID;
+    if (!ch) return;
+    let displayName;
+    if (isCurrentChannelDM) {
+        const dmRow = document.querySelector(`#dm-list [data-dm-channel="${ch}"]`);
+        displayName = dmRow ? (dmRow.querySelector('.text-vc-text')?.textContent || 'Direct message') : 'Direct message';
+        sendWS({ type: 'huddle_end', payload: {} });
+    } else {
+        const item = document.querySelector(`[data-channel-id="${ch}"] [data-ch-name]`);
+        displayName = item ? item.dataset.chName : 'Channel';
+    }
+    isDMHuddleActive = false;
+    outgoingCallChannelID = null;
+    outgoingCalleeUserId = null;
+    outgoingCalleeUsername = null;
+    removeOutgoingPhantomCard();
+    chatOnlyChannelID = ch;
+    try { sessionStorage.removeItem('vocala-in-call'); } catch (_) {}
+    cleanupWebRTC();
+    sendWS({ type: 'leave_channel' });
+    renderChannelChatOnly(ch, displayName, { isDM: isCurrentChannelDM });
+    sendWS({ type: 'peek_history', payload: { channel_id: ch } });
+    if (isCurrentChannelDM) loadDMList();
+}
+
+function startDMHuddle(channelID, otherUserId, displayName) {
+    isDMHuddleActive = true;
+    outgoingCalleeUserId = otherUserId;
+    outgoingCalleeUsername = displayName;
+    sendWS({ type: 'huddle_invite', payload: { to_user_id: otherUserId } });
+    currentChannelID = null;
+    joinChannel(channelID, displayName, { forceHuddle: true });
+}
+
+async function openNewDMPicker() {
+    try {
+        const res = await fetch('/api/users');
+        const users = await res.json();
+        const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
+        const others = (users || []).filter(u => u.username !== selfName);
+
+        const old = document.getElementById('new-dm-picker');
+        if (old) old.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'new-dm-picker';
+        modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4';
+        modal.innerHTML = `
+            <div class="bg-vc-sidebar border border-vc-border rounded-xl shadow-2xl w-80 max-h-[70vh] flex flex-col">
+                <div class="flex items-center justify-between px-4 py-3 border-b border-vc-border">
+                    <h3 class="text-sm font-bold text-vc-text">New direct message</h3>
+                    <button onclick="document.getElementById('new-dm-picker').remove()" class="text-vc-muted hover:text-vc-text transition">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                    </button>
+                </div>
+                <input id="new-dm-search" type="text" placeholder="Search…" autocomplete="off"
+                    class="m-3 px-3 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition">
+                <div id="new-dm-list" class="flex-1 overflow-y-auto px-2 pb-2 space-y-1"></div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+
+        const listEl = document.getElementById('new-dm-list');
+        const render = (filter) => {
+            const q = (filter || '').toLowerCase().trim();
+            const matches = others.filter(u => !q || u.username.toLowerCase().includes(q));
+            if (matches.length === 0) {
+                listEl.innerHTML = '<div class="text-center text-vc-muted text-xs py-3">No users</div>';
+                return;
+            }
+            listEl.innerHTML = matches.map(u => `
+                <button onclick="startDMWithUser(${u.id}, '${escapeHTML(u.username).replace(/'/g, "\\'")}')"
+                    class="w-full text-left flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-vc-hover transition">
+                    <img src="${avatarURL(u.username)}" alt="" class="w-6 h-6 rounded-full">
+                    <span class="text-sm text-vc-text">${escapeHTML(u.username)}</span>
+                </button>
+            `).join('');
+        };
+        render('');
+        document.getElementById('new-dm-search').addEventListener('input', (e) => render(e.target.value));
+    } catch (err) {
+        console.error('openNewDMPicker failed', err);
+    }
+}
+
+async function startDMWithUser(userId, username) {
+    document.getElementById('new-dm-picker')?.remove();
+    try {
+        const fd = new FormData();
+        fd.append('user_id', userId);
+        fd.append('csrf_token', getCSRFToken());
+        const res = await fetch('/api/dms/open', { method: 'POST', body: fd });
+        if (!res.ok) {
+            showToast('Failed to open DM');
+            return;
+        }
+        const data = await res.json();
+        dmChannelIds.add(data.channel_id);
+        await loadDMList();
+        joinChannel(data.channel_id, username, { isDM: true });
+    } catch (err) {
+        console.error('startDMWithUser failed', err);
+    }
+}
+
+async function startQuickRoom() {
+    try {
+        const fd = new FormData();
+        fd.append('csrf_token', getCSRFToken());
+        const res = await fetch('/channels/quick', {
+            method: 'POST',
+            body: fd,
+        });
+        if (!res.ok) {
+            showToast('Failed to create quick room');
+            return;
+        }
+        const data = await res.json();
+        const shareUrl = location.origin + (data.guest_url || data.url);
+        try {
+            await navigator.clipboard.writeText(shareUrl);
+            showToast('Guest link copied');
+        } catch (_) {
+        }
+        joinChannel(data.id, data.name);
+    } catch (err) {
+        console.error('Quick room failed:', err);
+    }
+}
+
+function showHuddleInvite(msg) {
+    if (currentChannelID === msg.channel_id && isDMHuddleActive) return;
+    if (incomingCallChannelID === msg.channel_id) return;
+    const existing = document.getElementById('huddle-invite-banner');
+    if (existing) existing.remove();
+    const banner = document.createElement('div');
+    banner.id = 'huddle-invite-banner';
+    banner.className = 'fixed top-4 right-4 z-50 flex items-center gap-3 px-4 py-3 rounded-lg bg-vc-accent text-white shadow-2xl text-sm';
+    banner.innerHTML = `
+        <svg class="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/>
+        </svg>
+        <span><strong>${escapeHTML(msg.from_name || 'Someone')}</strong> is calling…</span>
+        <button id="huddle-accept" class="px-3 py-1 rounded bg-white/20 hover:bg-white/30 transition">Join</button>
+        <button id="huddle-decline" class="px-2 py-1 rounded hover:bg-white/20 transition">Dismiss</button>
+    `;
+    document.body.appendChild(banner);
+    incomingCallChannelID = msg.channel_id;
+    updateCallIndicators();
+    startRingtone();
+    let dismissed = false;
+    const close = () => {
+        dismissed = true;
+        banner.remove();
+        stopRingtone();
+        incomingCallChannelID = null;
+        updateCallIndicators();
+    };
+    document.getElementById('huddle-accept').onclick = () => {
+        close();
+        currentChannelID = null;
+        joinChannel(msg.channel_id, msg.channel_name, { forceHuddle: true });
+    };
+    document.getElementById('huddle-decline').onclick = () => {
+        sendWS({
+            type: 'huddle_decline',
+            payload: { from_user_id: msg.from_user_id, channel_id: msg.channel_id, missed: false },
+        });
+        close();
+    };
+    setTimeout(() => {
+        if (!dismissed) {
+            sendWS({
+                type: 'huddle_decline',
+                payload: { from_user_id: msg.from_user_id, channel_id: msg.channel_id, missed: true },
+            });
+            close();
+        }
+    }, 60000);
+}
+
+function showBarReactionPicker(anchorBtn) {
+    const old = document.getElementById('voice-reaction-picker');
+    if (old) { old.remove(); return; }
+    const picker = document.createElement('div');
+    picker.id = 'voice-reaction-picker';
+    picker.className = 'fixed z-50 bg-vc-sidebar border border-vc-border rounded-xl shadow-2xl p-1.5 flex gap-1';
+    REACTION_EMOJIS.forEach(emoji => {
+        const btn = document.createElement('button');
+        btn.className = 'hover:bg-vc-hover rounded-lg w-10 h-10 text-2xl transition flex items-center justify-center';
+        btn.textContent = emoji;
+        btn.onclick = (e) => {
+            e.stopPropagation();
+            sendVoiceReaction(emoji);
+            picker.remove();
+        };
+        picker.appendChild(btn);
+    });
+    document.body.appendChild(picker);
+    const rect = anchorBtn.getBoundingClientRect();
+    const pickerRect = picker.getBoundingClientRect();
+    let left = rect.left + rect.width / 2 - pickerRect.width / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pickerRect.width - 8));
+    picker.style.left = left + 'px';
+    picker.style.top = (rect.top - pickerRect.height - 8) + 'px';
+    const dismiss = (e) => {
+        if (!picker.contains(e.target) && e.target !== anchorBtn) {
+            picker.remove();
+            document.removeEventListener('click', dismiss);
+        }
+    };
+    setTimeout(() => document.addEventListener('click', dismiss), 0);
+    setTimeout(() => picker.remove(), 8000);
+}
+
+function showVoiceReaction(msg) {
+    const card = document.querySelector(`#channel-view-users [data-user-id="${msg.user_id}"]`);
+    const target = card || document.querySelector(`#expanded-users-rail [data-user-id="${msg.user_id}"]`);
+    if (target) {
+        if (getComputedStyle(target).position === 'static') target.style.position = 'relative';
+        const existing = target.querySelector('.voice-reaction-badge');
+        if (existing) existing.remove();
+        const badge = document.createElement('div');
+        badge.className = 'voice-reaction-badge pointer-events-none absolute -top-2 -right-2 w-10 h-10 rounded-full bg-vc-accent text-white shadow-lg flex items-center justify-center text-2xl border-2 border-vc-bg';
+        badge.style.zIndex = '20';
+        badge.style.animation = 'voiceReactionPop 3s ease-out forwards';
+        badge.textContent = msg.emoji;
+        target.appendChild(badge);
+        setTimeout(() => badge.remove(), 3000);
+    }
+    pushReactionToFeed(msg);
+}
+
+const REACTION_FEED_TTL = 5000;
+const REACTION_FEED_STATE = new Map(); // emoji -> { count, lastTs, names: Set, removeTimer }
+
+function ensureReactionsFeed() {
+    let feed = document.getElementById('reactions-feed');
+    if (feed) return feed;
+    const voiceArea = document.getElementById('voice-area');
+    if (!voiceArea) return null;
+    feed = document.createElement('div');
+    feed.id = 'reactions-feed';
+    feed.className = 'pointer-events-none absolute bottom-4 right-4 flex flex-col items-end gap-2';
+    feed.style.zIndex = '25';
+    voiceArea.appendChild(feed);
+    return feed;
+}
+
+function pushReactionToFeed(msg) {
+    const feed = ensureReactionsFeed();
+    if (!feed) return;
+    const emoji = msg.emoji;
+    let entry = REACTION_FEED_STATE.get(emoji);
+    let pill = feed.querySelector(`[data-emoji="${emoji}"]`);
+    if (!entry || !pill) {
+        entry = { count: 0, names: new Set(), removeTimer: null };
+        REACTION_FEED_STATE.set(emoji, entry);
+        pill = document.createElement('div');
+        pill.dataset.emoji = emoji;
+        pill.className = 'pointer-events-auto flex items-center gap-2 px-3 py-1.5 rounded-full bg-vc-sidebar/95 border border-vc-border shadow-lg text-sm transition-all';
+        pill.style.animation = 'reactionPillIn 0.25s ease-out';
+        pill.innerHTML = `
+            <span class="text-xl leading-none reaction-emoji">${emoji}</span>
+            <span class="text-xs text-vc-muted reaction-from"></span>
+            <span class="text-sm font-semibold text-vc-text reaction-count" style="display:none"></span>
+        `;
+        feed.appendChild(pill);
+    } else {
+        pill.style.animation = 'none';
+        void pill.offsetWidth;
+        pill.style.animation = 'reactionPillPulse 0.35s ease-out';
+    }
+    entry.count += 1;
+    entry.names.add(msg.username || '');
+    pill.querySelector('.reaction-from').textContent = Array.from(entry.names).slice(-2).join(', ');
+    const counter = pill.querySelector('.reaction-count');
+    if (entry.count > 1) {
+        counter.textContent = '×' + entry.count;
+        counter.style.display = '';
+    } else {
+        counter.style.display = 'none';
+    }
+    if (entry.removeTimer) clearTimeout(entry.removeTimer);
+    entry.removeTimer = setTimeout(() => {
+        pill.style.animation = 'reactionPillOut 0.3s ease-in forwards';
+        setTimeout(() => {
+            pill.remove();
+            REACTION_FEED_STATE.delete(emoji);
+        }, 280);
+    }, REACTION_FEED_TTL);
+}
+
 function clearChat() {
     if (!confirm('Clear all chat messages in this channel?')) return;
     sendWS({ type: 'clear_chat' });
@@ -2217,16 +3812,17 @@ function sendChatMessage(event) {
 
     sendWS({
         type: 'chat_message',
-        payload: { text },
+        payload: { text, channel_id: currentChannelID },
     });
     input.value = '';
 }
 
-function loadChatHistory(messages) {
+function loadChatHistory(messages, reactions) {
     const container = document.getElementById('chat-messages');
     if (!container) return;
     container.innerHTML = '';
     messages.forEach(msg => appendChatMessage({ ...msg, _history: true }));
+    (reactions || []).forEach(r => addChatReaction(r));
 }
 
 function appendChatMessage(msg) {
@@ -2235,18 +3831,33 @@ function appendChatMessage(msg) {
 
     // Sound + notification for messages from others (not history load)
     const selfName = document.getElementById('self-avatar')?.dataset?.username;
-    if (msg.username !== selfName && !msg._history) {
+    if (msg.username !== selfName && !msg._history && msg.kind !== 'system') {
         playChatSound();
         if (document.hidden) showNotification(msg.username + ': ' + msg.text);
     }
 
     const el = document.createElement('div');
     el.id = 'msg-' + msg.id;
-    el.className = 'group relative px-2 py-1 rounded hover:bg-vc-hover/30 transition';
 
     const time = new Date(msg.timestamp * 1000);
     const timeStr = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+    if (msg.kind === 'system') {
+        el.className = 'flex items-center gap-2 my-2 px-2';
+        el.innerHTML = `
+            <div class="flex-1 h-px bg-vc-border"></div>
+            <div class="flex items-center gap-2 px-3 py-1 rounded-full bg-vc-channel/60 border border-vc-border">
+                <span class="text-xs text-vc-muted">${escapeHTML(msg.text)}</span>
+                <span class="text-[10px] text-vc-muted/70">${timeStr}</span>
+            </div>
+            <div class="flex-1 h-px bg-vc-border"></div>
+        `;
+        container.appendChild(el);
+        container.scrollTop = container.scrollHeight;
+        return;
+    }
+
+    el.className = 'group relative px-2 py-1 rounded hover:bg-vc-hover/30 transition';
     el.innerHTML = `
         <div class="flex gap-2">
             <img src="${avatarURL(msg.username)}" alt="" class="w-6 h-6 rounded-full flex-shrink-0 mt-0.5">
@@ -2326,9 +3937,25 @@ function addChatReaction(msg) {
     container.appendChild(badge);
 }
 
+function removeChatReaction(msg) {
+    const container = document.getElementById('reactions-' + msg.message_id);
+    if (!container) return;
+    const badge = container.querySelector(`[data-emoji="${msg.emoji}"]`);
+    if (!badge) return;
+    const userId = String(msg.user_id);
+    const users = (badge.dataset.users || '').split(',').filter(Boolean).filter(u => u !== userId);
+    if (users.length === 0) {
+        badge.remove();
+        return;
+    }
+    badge.dataset.users = users.join(',');
+    badge.dataset.count = String(users.length);
+    badge.textContent = msg.emoji + (users.length > 1 ? ' ' + users.length : '');
+}
+
 // ─── WS Media Transport (mobile fallback) ─────────────────────
 
-const USE_WS_MEDIA = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const USE_WS_MEDIA = /Android/i.test(navigator.userAgent);
 let wsMediaRecorder = null;
 let wsMediaAudioElements = {}; // userID -> Audio element
 let wsMediaVideoElements = {}; // userID -> container element
@@ -2336,12 +3963,20 @@ let wsMediaVideoElements = {}; // userID -> container element
 async function startWSMedia() {
     try {
         localStream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: !rnnoiseEnabled, autoGainControl: true },
+            audio: {
+                echoCancellation: true,
+                noiseSuppression: noiseSuppressionEnabled && !rnnoiseEnabled,
+                autoGainControl: agcEnabled && !rnnoiseEnabled,
+            },
             video: false,
         });
+        hideGlobalMicWarning();
 
         // Setup VAD (reads raw stream for level detection)
         audioContext = new AudioContext(rnnoiseEnabled ? { sampleRate: 48000 } : undefined);
+        if (audioContext.state === 'suspended') {
+            try { await audioContext.resume(); } catch (_) {}
+        }
         const rnnoiseNode = await loadRnnoiseNode(audioContext);
         const source = audioContext.createMediaStreamSource(localStream);
         gainNode = audioContext.createGain();
@@ -2373,15 +4008,26 @@ async function startWSMedia() {
         }
     } catch (err) {
         console.error('WS Media failed:', err);
-        showGlobalMicWarning();
+        updateRTCStatusText('connected', 'Listen-only (no mic) — tap mic to enable');
     }
 }
 
 function startWSAudioSend(stream) {
-    // Use MediaRecorder with small timeslice for low latency
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : 'audio/webm';
+    const candidates = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4;codecs=mp4a.40.2',
+        'audio/mp4;codecs=opus',
+        'audio/mp4',
+    ];
+    let mimeType = null;
+    for (const c of candidates) {
+        if (MediaRecorder.isTypeSupported(c)) { mimeType = c; break; }
+    }
+    if (!mimeType) {
+        console.error('No supported MediaRecorder mimeType found — WS media send disabled');
+        return;
+    }
 
     wsMediaRecorder = new MediaRecorder(stream, {
         mimeType: mimeType,
@@ -2542,16 +4188,28 @@ function autoJoinFromURL() {
         for (const btn of buttons) {
             if (btn.dataset.chName === channelName) {
                 const chId = parseInt(btn.dataset.chId);
-                joinChannel(chId, channelName);
+                let wasInCall = null;
+                try { wasInCall = sessionStorage.getItem('vocala-in-call'); } catch (_) {}
+                if (wasInCall && parseInt(wasInCall, 10) === chId) {
+                    joinChannel(chId, channelName, { forceHuddle: true, restore: true });
+                } else {
+                    joinChannel(chId, channelName, { chatOnly: true });
+                }
                 return true;
             }
         }
         return false;
     };
 
-    if (!tryJoin()) {
-        setTimeout(tryJoin, 1000);
-    }
+    if (tryJoin()) return;
+
+    let attempts = 0;
+    const interval = setInterval(() => {
+        attempts += 1;
+        if (tryJoin() || attempts >= 40) {
+            clearInterval(interval);
+        }
+    }, 50);
 }
 
 // Handle browser back/forward
@@ -2589,11 +4247,14 @@ async function openMemberManager(channelId, channelName) {
                 </button>
             </div>
             <div class="p-3 border-b border-vc-border">
-                <div class="flex gap-2 mb-2">
-                    <select id="member-user-select" class="flex-1 px-3 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text focus:outline-none focus:border-vc-accent transition">
-                        <option value="">Loading users...</option>
-                    </select>
-                    <button onclick="addMemberFromSelect(${channelId})" class="px-3 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-sm font-medium rounded-lg transition">Add</button>
+                <div class="relative mb-2">
+                    <div class="flex gap-2">
+                        <input id="member-user-search" type="text" placeholder="Search user to add…" autocomplete="off"
+                            class="flex-1 min-w-0 px-3 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition">
+                        <button id="member-add-btn" onclick="addMemberFromSearch(${channelId})" disabled
+                            class="flex-shrink-0 px-3 py-1.5 bg-vc-accent hover:bg-vc-accent/80 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition">Add</button>
+                    </div>
+                    <div id="member-user-options" class="hidden absolute left-0 right-0 mt-1 bg-vc-sidebar border border-vc-border rounded-lg shadow-lg max-h-48 overflow-y-auto z-10"></div>
                 </div>
                 <button onclick="generateInviteLink(${channelId})" class="w-full px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-text text-sm rounded-lg transition flex items-center justify-center gap-1.5">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -2619,6 +4280,10 @@ async function openMemberManager(channelId, channelName) {
 async function loadMembers(channelId) {
     try {
         const res = await fetch('/channels/members?id=' + channelId);
+        if (res.status === 404) {
+            handleStaleChannel();
+            return;
+        }
         if (res.status === 403) {
             document.getElementById('member-list').innerHTML = '<div class="text-center text-vc-red text-xs py-4">No permission to manage members</div>';
             return;
@@ -2654,27 +4319,90 @@ async function loadUserSelect(channelId) {
             fetch('/api/users'),
             fetch('/channels/members?id=' + channelId),
         ]);
+        if (membersRes.status === 404) {
+            handleStaleChannel();
+            return;
+        }
         const users = await usersRes.json();
         const membersData = await membersRes.json();
         const memberIds = new Set((membersData.members || []).map(m => m.UserID));
 
-        const select = document.getElementById('member-user-select');
-        if (!select) return;
+        const input = document.getElementById('member-user-search');
+        const optionsEl = document.getElementById('member-user-options');
+        const addBtn = document.getElementById('member-add-btn');
+        if (!input || !optionsEl || !addBtn) return;
+
         const available = users.filter(u => !memberIds.has(u.id));
         if (available.length === 0) {
-            select.innerHTML = '<option value="">All users already added</option>';
-        } else {
-            select.innerHTML = '<option value="">Select user...</option>' +
-                available.map(u => `<option value="${escapeHTML(u.username)}">${escapeHTML(u.username)}</option>`).join('');
+            input.disabled = true;
+            input.placeholder = 'All users already added';
+            return;
         }
+        input.disabled = false;
+        input.placeholder = 'Search user to add…';
+        input._available = available;
+        input._channelId = channelId;
+
+        const render = (filter) => {
+            const q = (filter || '').toLowerCase().trim();
+            const matches = available.filter(u => !q || u.username.toLowerCase().includes(q));
+            if (matches.length === 0) {
+                optionsEl.innerHTML = '<div class="px-3 py-2 text-xs text-vc-muted">No matches</div>';
+                addBtn.disabled = true;
+                return;
+            }
+            optionsEl.innerHTML = matches.map(u =>
+                `<button type="button" data-username="${escapeHTML(u.username)}" class="member-opt w-full text-left px-3 py-1.5 hover:bg-vc-hover transition flex items-center gap-2">
+                    <img src="${avatarURL(u.username)}" alt="" class="w-5 h-5 rounded-full">
+                    <span class="text-sm text-vc-text">${escapeHTML(u.username)}</span>
+                </button>`
+            ).join('');
+            optionsEl.querySelectorAll('.member-opt').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    input.value = btn.dataset.username;
+                    optionsEl.classList.add('hidden');
+                    addBtn.disabled = false;
+                    addBtn.focus();
+                });
+            });
+            const exact = available.find(u => u.username.toLowerCase() === q);
+            addBtn.disabled = !exact;
+        };
+
+        input.oninput = () => {
+            optionsEl.classList.remove('hidden');
+            render(input.value);
+        };
+        input.onfocus = () => {
+            optionsEl.classList.remove('hidden');
+            render(input.value);
+        };
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                if (!addBtn.disabled) {
+                    addMemberFromSearch(channelId);
+                } else {
+                    const first = optionsEl.querySelector('.member-opt');
+                    if (first) first.click();
+                }
+            } else if (e.key === 'Escape') {
+                optionsEl.classList.add('hidden');
+            }
+        };
+        document.addEventListener('click', (e) => {
+            if (!optionsEl.contains(e.target) && e.target !== input) {
+                optionsEl.classList.add('hidden');
+            }
+        });
     } catch (err) {
         console.error('Failed to load users:', err);
     }
 }
 
-async function addMemberFromSelect(channelId) {
-    const select = document.getElementById('member-user-select');
-    const username = select ? select.value : '';
+async function addMemberFromSearch(channelId) {
+    const input = document.getElementById('member-user-search');
+    const username = input ? input.value.trim() : '';
     if (!username) return;
 
     const form = new FormData();
@@ -2685,13 +4413,15 @@ async function addMemberFromSelect(channelId) {
     try {
         const res = await fetch('/channels/members/add', { method: 'POST', body: form });
         if (res.status === 404) {
-            alert('User not found');
+            showToast('User not found');
             return;
         }
         if (!res.ok) {
-            alert('Failed to add member');
+            showToast('Failed to add member');
             return;
         }
+        if (input) input.value = '';
+        document.getElementById('member-user-options')?.classList.add('hidden');
         loadMembers(channelId);
         loadUserSelect(channelId);
     } catch (err) {
@@ -2706,6 +4436,10 @@ async function generateInviteLink(channelId) {
 
     try {
         const res = await fetch('/channels/invite', { method: 'POST', body: form });
+        if (res.status === 404) {
+            handleStaleChannel();
+            return;
+        }
         if (!res.ok) {
             alert('Failed to generate invite link');
             return;
@@ -2897,7 +4631,9 @@ async function generateGuestLink(channelId, hours, btn) {
 
 // --- Settings modal (devices, sounds) ---
 
-let rnnoiseEnabled = localStorage.getItem('vocala-rnnoise') === '1';
+let rnnoiseEnabled = (localStorage.getItem('vocala-rnnoise') ?? '1') === '1';
+let agcEnabled = localStorage.getItem('vocala-agc') !== '0';
+let noiseSuppressionEnabled = localStorage.getItem('vocala-ns') !== '0';
 let selectedMicId = localStorage.getItem('vocala-mic') || '';
 let selectedCamId = localStorage.getItem('vocala-cam') || '';
 let selectedSpkId = localStorage.getItem('vocala-spk') || '';
@@ -2944,6 +4680,22 @@ async function openSettings() {
                         <input type="checkbox" id="settings-sounds" ${notifSoundsEnabled ? 'checked' : ''}
                             class="rounded border-vc-border text-vc-accent focus:ring-vc-accent"
                             onchange="toggleSounds()">
+                    </label>
+                </div>
+                <div class="border-t border-vc-border pt-3">
+                    <label class="flex items-center justify-between cursor-pointer">
+                        <span class="text-sm text-vc-text">Automatic gain control</span>
+                        <input type="checkbox" id="settings-agc" ${agcEnabled ? 'checked' : ''}
+                            class="rounded border-vc-border text-vc-accent focus:ring-vc-accent"
+                            onchange="toggleAgc()">
+                    </label>
+                </div>
+                <div class="border-t border-vc-border pt-3">
+                    <label class="flex items-center justify-between cursor-pointer">
+                        <span class="text-sm text-vc-text">Noise suppression</span>
+                        <input type="checkbox" id="settings-ns" ${noiseSuppressionEnabled ? 'checked' : ''}
+                            class="rounded border-vc-border text-vc-accent focus:ring-vc-accent"
+                            onchange="toggleNoiseSuppression()">
                     </label>
                 </div>
                 <div class="border-t border-vc-border pt-3">
