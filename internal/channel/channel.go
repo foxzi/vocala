@@ -15,10 +15,14 @@ import (
 var validChannelName = regexp.MustCompile(`^[a-zA-Z0-9_\-. ]{1,50}$`)
 
 type Channel struct {
-	ID        int64
-	Name      string
-	CreatedBy int64
-	IsPrivate bool
+	ID          int64
+	Name        string
+	CreatedBy   int64
+	IsPrivate   bool
+	IsEphemeral bool
+	IsDM        bool
+	DMUserA     int64
+	DMUserB     int64
 }
 
 type ConnectedUser struct {
@@ -65,7 +69,7 @@ func Create(name string, createdBy int64, isPrivate bool) (*Channel, error) {
 }
 
 func List() ([]Channel, error) {
-	rows, err := database.DB.Query("SELECT id, name, created_by, is_private FROM channels ORDER BY name")
+	rows, err := database.DB.Query("SELECT id, name, created_by, is_private, is_ephemeral FROM channels WHERE is_dm = 0 ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +78,7 @@ func List() ([]Channel, error) {
 	var channels []Channel
 	for rows.Next() {
 		var ch Channel
-		if err := rows.Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate, &ch.IsEphemeral); err != nil {
 			return nil, err
 		}
 		channels = append(channels, ch)
@@ -86,13 +90,15 @@ func List() ([]Channel, error) {
 // Public channels are always included; private channels only if the user
 // is the creator, a member, or an admin.
 func ListForUser(userID int64, isAdmin bool) ([]Channel, error) {
-	query := "SELECT id, name, created_by, is_private FROM channels ORDER BY name"
+	query := "SELECT id, name, created_by, is_private, is_ephemeral FROM channels WHERE is_dm = 0 AND is_ephemeral = 0 ORDER BY name"
 	args := []any{}
 	if !isAdmin {
-		query = `SELECT id, name, created_by, is_private FROM channels
-		         WHERE is_private = 0
+		query = `SELECT id, name, created_by, is_private, is_ephemeral FROM channels
+		         WHERE is_dm = 0 AND is_ephemeral = 0 AND (
+		            is_private = 0
 		            OR created_by = ?
 		            OR id IN (SELECT channel_id FROM channel_members WHERE user_id = ?)
+		         )
 		         ORDER BY name`
 		args = []any{userID, userID}
 	}
@@ -106,7 +112,7 @@ func ListForUser(userID int64, isAdmin bool) ([]Channel, error) {
 	var channels []Channel
 	for rows.Next() {
 		var ch Channel
-		if err := rows.Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate, &ch.IsEphemeral); err != nil {
 			return nil, err
 		}
 		channels = append(channels, ch)
@@ -116,8 +122,10 @@ func ListForUser(userID int64, isAdmin bool) ([]Channel, error) {
 
 func GetByID(id int64) (*Channel, error) {
 	var ch Channel
-	err := database.DB.QueryRow("SELECT id, name, created_by, is_private FROM channels WHERE id = ?", id).
-		Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate)
+	err := database.DB.QueryRow(
+		`SELECT id, name, created_by, is_private, is_ephemeral, is_dm, dm_user_a, dm_user_b
+		 FROM channels WHERE id = ?`, id,
+	).Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate, &ch.IsEphemeral, &ch.IsDM, &ch.DMUserA, &ch.DMUserB)
 	if err != nil {
 		return nil, err
 	}
@@ -127,6 +135,78 @@ func GetByID(id int64) (*Channel, error) {
 func Delete(id int64) error {
 	_, err := database.DB.Exec("DELETE FROM channels WHERE id = ?", id)
 	return err
+}
+
+// CreateEphemeral creates a private, ephemeral (auto-cleanup) channel.
+// Used by Quick rooms and Huddles. Returns the new channel and a slug-name.
+func CreateEphemeral(prefix string, createdBy int64, extraMember int64) (*Channel, error) {
+	suffix := make([]byte, 4)
+	if _, err := rand.Read(suffix); err != nil {
+		return nil, err
+	}
+	name := fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(suffix))
+	for {
+		var existing int
+		_ = database.DB.QueryRow("SELECT 1 FROM channels WHERE name = ?", name).Scan(&existing)
+		if existing == 0 {
+			break
+		}
+		_, _ = rand.Read(suffix)
+		name = fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(suffix))
+	}
+	res, err := database.DB.Exec(
+		"INSERT INTO channels (name, created_by, is_private, is_ephemeral) VALUES (?, ?, 1, 1)",
+		name, createdBy,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	ch := &Channel{ID: id, Name: name, CreatedBy: createdBy, IsPrivate: true, IsEphemeral: true}
+	AddMember(id, createdBy)
+	if extraMember > 0 && extraMember != createdBy {
+		AddMember(id, extraMember)
+	}
+	return ch, nil
+}
+
+// MarkEphemeralEmptyState updates the empty-since timestamp on ephemeral
+// channels: sets it to now when no users remain, clears it when someone joins.
+func MarkEphemeralEmptyState(channelID int64) {
+	users := GetUsers(channelID)
+	var ts int64
+	if len(users) == 0 {
+		ts = time.Now().Unix()
+	}
+	database.DB.Exec(
+		"UPDATE channels SET ephemeral_empty_since = ? WHERE id = ? AND is_ephemeral = 1",
+		ts, channelID,
+	)
+}
+
+// CleanupEphemeralOlderThan removes ephemeral channels that have been empty
+// for at least the given duration. Returns the number of channels deleted.
+func CleanupEphemeralOlderThan(emptyFor time.Duration) (int, error) {
+	cutoff := time.Now().Unix() - int64(emptyFor.Seconds())
+	rows, err := database.DB.Query(
+		"SELECT id FROM channels WHERE is_ephemeral = 1 AND ephemeral_empty_since > 0 AND ephemeral_empty_since < ?",
+		cutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	for _, id := range ids {
+		database.DB.Exec("DELETE FROM channels WHERE id = ?", id)
+	}
+	return len(ids), nil
 }
 
 // SetPrivacy toggles a channel's is_private flag. When making a channel
@@ -151,14 +231,14 @@ func SetPrivacy(channelID int64, isPrivate bool) error {
 }
 
 func Join(channelID int64, userID int64, username string) {
+	var prev int64
 	mu.Lock()
-	defer mu.Unlock()
-
 	// Leave current channel first
 	if oldCh, ok := userToChannel[userID]; ok {
 		if users, exists := channelUsers[oldCh]; exists {
 			delete(users, userID)
 		}
+		prev = oldCh
 	}
 
 	if channelUsers[channelID] == nil {
@@ -169,14 +249,19 @@ func Join(channelID int64, userID int64, username string) {
 		Username: username,
 	}
 	userToChannel[userID] = channelID
+	mu.Unlock()
+
+	if prev != 0 && prev != channelID {
+		MarkEphemeralEmptyState(prev)
+	}
+	MarkEphemeralEmptyState(channelID)
 }
 
 func Leave(userID int64) int64 {
 	mu.Lock()
-	defer mu.Unlock()
-
 	chID, ok := userToChannel[userID]
 	if !ok {
+		mu.Unlock()
 		return 0
 	}
 
@@ -184,6 +269,9 @@ func Leave(userID int64) int64 {
 		delete(users, userID)
 	}
 	delete(userToChannel, userID)
+	mu.Unlock()
+
+	MarkEphemeralEmptyState(chID)
 	return chID
 }
 
@@ -340,12 +428,12 @@ func CanJoin(channelID, userID int64, isAdmin bool) bool {
 
 // CanManage checks if a user can manage members of a private channel.
 func CanManage(channelID, userID int64, isAdmin bool) bool {
-	if isAdmin {
-		return true
-	}
 	ch, err := GetByID(channelID)
 	if err != nil {
 		return false
+	}
+	if isAdmin {
+		return true
 	}
 	return ch.CreatedBy == userID
 }
