@@ -100,8 +100,8 @@
             margin: 0 !important;
         }
         body.expanded-tile-mode #expanded-users-rail {
-            flex: 0 0 180px;
-            min-width: 180px;
+            flex: 0 0 240px;
+            min-width: 240px;
             height: 100%;
             background: var(--vc-sidebar);
             border-left: 1px solid var(--vc-border);
@@ -109,17 +109,13 @@
             overflow-y: auto;
             display: flex !important;
             flex-direction: column;
-            gap: 6px;
+            gap: 8px;
         }
-        #camera-grid {
-            position: absolute;
-            width: 1px;
-            height: 1px;
-            overflow: hidden;
-            opacity: 0;
-            pointer-events: none;
-            left: -9999px;
+        body.expanded-tile-mode #expanded-users-rail > * {
+            flex: 0 0 auto;
+            width: 100%;
         }
+        /* Camera grid is part of the normal flow — auto-grid mode of Google Meet. */
         body.expanded-tile-mode #camera-grid {
             position: relative;
             width: auto;
@@ -130,6 +126,9 @@
             left: auto;
         }
         #expanded-users-rail { display: none; }
+        body.expanded-tile-mode #expanded-users-rail {
+            display: flex;
+        }
         body.expanded-tile-mode #expanded-users-rail.rail-hidden,
         #expanded-users-rail.rail-hidden { display: none !important; visibility: hidden !important; width: 0 !important; flex: 0 0 0 !important; min-width: 0 !important; padding: 0 !important; border: 0 !important; }
         .expanded-tile > .absolute.top-1.right-1 { display: none !important; }
