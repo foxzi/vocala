@@ -362,11 +362,16 @@ function handleWSMessage(msg) {
         case 'chat_message':
             appendChatMessage(msg);
             if (typeof loadDMListDebounced === 'function') loadDMListDebounced();
-            if (typeof bumpDMUnread === 'function' && msg.kind !== 'system') {
-                const selfName = document.getElementById('self-avatar')?.dataset?.username;
-                if (msg.username !== selfName) {
-                    bumpDMUnread(msg.channel_id);
-                }
+            const selfNameForChat = document.getElementById('self-avatar')?.dataset?.username;
+            const fromOther = msg.username !== selfNameForChat;
+            if (typeof bumpDMUnread === 'function' && msg.kind !== 'system' && fromOther) {
+                bumpDMUnread(msg.channel_id);
+            }
+            // Bump the in-call chat button badge when the panel is hidden and
+            // the message belongs to the currently-active channel.
+            if (fromOther && msg.kind !== 'system' && msg.channel_id === currentChannelID && isInCallChatPanelHidden()) {
+                inCallChatUnread++;
+                updateChatButtonBadge();
             }
             break;
         case 'chat_history':
@@ -450,17 +455,28 @@ function handleWSMessage(msg) {
             {
                 if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
                 const grid = document.getElementById('camera-grid');
+                let removed = 0;
                 if (grid) {
                     grid.querySelectorAll('[id^="remote-screen-share-"]').forEach(el => {
                         const v = el.querySelector('video');
                         if (v) { try { v.pause(); } catch (_) {} v.srcObject = null; }
                         el.remove();
+                        removed++;
                     });
                     updateGridColumns();
                 }
-                document.body.classList.remove('expanded-tile-mode');
-                expandedCamId = null;
-                clearExpandedUsersRail();
+                // If the removed screen was the main stage, promote whatever is
+                // left (a camera, the previous main, etc.) so we don't end up
+                // with a blank main and live thumbnails in the rail.
+                const wasMainGone = expandedCamId && !document.getElementById(expandedCamId);
+                if (wasMainGone) {
+                    expandedCamId = null;
+                    promoteNextMediaToMainStage();
+                }
+                if (!expandedCamId) {
+                    document.body.classList.remove('expanded-tile-mode');
+                    clearExpandedUsersRail();
+                }
                 attachUserPreviewsToCards();
                 latestScreenPreview = null;
                 screenShareUsername = null;
@@ -647,19 +663,50 @@ function toggleSidebar() {
     }
 }
 
+// Per-channel unread counter for messages received while the chat panel is hidden.
+let inCallChatUnread = 0;
+
 function toggleMobileChat() {
     const panel = document.getElementById('chat-panel');
     if (!panel) return;
-    const isMobile = window.innerWidth < 768;
-    if (isMobile) {
-        panel.classList.toggle('hidden');
-        panel.classList.toggle('flex');
-    } else {
-        panel.classList.toggle('chat-hidden');
+    const wasHidden = panel.classList.contains('hidden') || panel.classList.contains('chat-hidden');
+    panel.classList.remove('hidden', 'chat-hidden');
+    panel.classList.add('flex');
+    if (!wasHidden) {
+        // Closing
+        panel.classList.add('hidden', 'chat-hidden');
+        panel.classList.remove('flex');
+        return;
     }
-    if (!panel.classList.contains('hidden') && !panel.classList.contains('chat-hidden')) {
-        const msgs = document.getElementById('chat-messages');
-        if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    // Opening — reset unread counter and scroll to bottom
+    inCallChatUnread = 0;
+    updateChatButtonBadge();
+    const msgs = document.getElementById('chat-messages');
+    if (msgs) msgs.scrollTop = msgs.scrollHeight;
+}
+
+function isInCallChatPanelHidden() {
+    const panel = document.getElementById('chat-panel');
+    if (!panel) return true;
+    return panel.classList.contains('hidden') || panel.classList.contains('chat-hidden');
+}
+
+function updateChatButtonBadge() {
+    // Target the bar chat button specifically — there is another chat-toggle
+    // button inside the chat panel header which is hidden while the panel is
+    // closed; a generic selector would land on the wrong one.
+    const btn = document.getElementById('bar-chat-btn');
+    if (!btn) return;
+    let badge = btn.querySelector('.chat-unread-badge');
+    if (inCallChatUnread > 0) {
+        if (!badge) {
+            badge = document.createElement('span');
+            badge.className = 'chat-unread-badge absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-vc-red text-white text-[10px] font-bold flex items-center justify-center pointer-events-none';
+            btn.appendChild(badge);
+        }
+        badge.textContent = inCallChatUnread > 99 ? '99+' : String(inCallChatUnread);
+    } else if (badge) {
+        badge.remove();
     }
 }
 
@@ -718,6 +765,8 @@ function joinChannel(channelID, channelName, opts) {
     currentChannelID = channelID;
     isCurrentChannelDM = isDM;
     isDMHuddleActive = isDM && startHuddleNow;
+    inCallChatUnread = 0;
+    setTimeout(updateChatButtonBadge, 0);
     if (isDM && typeof clearDMUnread === 'function') {
         clearDMUnread(channelID);
     }
@@ -776,8 +825,8 @@ function joinChannel(channelID, channelName, opts) {
                     </div>
                     <div id="expanded-users-rail"></div>
                 </div>
-                <!-- Chat panel (hidden on mobile by default, toggle with button) -->
-                <div id="chat-panel" class="w-full md:w-64 border-t md:border-t-0 md:border-l border-vc-border flex flex-col bg-vc-sidebar/30 max-h-64 md:max-h-none hidden md:flex">
+                <!-- Chat panel — hidden by default on all viewports; toggle with the chat button. -->
+                <div id="chat-panel" class="w-full md:w-64 border-t md:border-t-0 md:border-l border-vc-border flex-col bg-vc-sidebar/30 max-h-64 md:max-h-none hidden chat-hidden">
                     <div class="px-3 py-2 border-b border-vc-border flex items-center gap-2">
                         <svg class="w-4 h-4 text-vc-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
@@ -841,8 +890,8 @@ function joinChannel(channelID, channelName, opts) {
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
                         </svg>
                     </button>
-                    <button onclick="toggleMobileChat()" title="Toggle chat"
-                        class="flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition">
+                    <button id="bar-chat-btn" onclick="toggleMobileChat()" title="Toggle chat"
+                        class="relative flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
                         </svg>
@@ -935,17 +984,79 @@ function hideResumeScreenBanner() {
 
 let lastChannelUsers = [];
 
+// setMeetGridColumns picks a Google-Meet-like column count based on
+// number of tiles, so each tile keeps a roughly square-ish 16:9 ratio.
+function setMeetGridColumns(grid, count) {
+    let cols;
+    if (count <= 1) cols = 1;
+    else if (count <= 4) cols = 2;
+    else if (count <= 9) cols = 3;
+    else if (count <= 16) cols = 4;
+    else cols = 5;
+    grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+}
+
+// userHasCameraTile returns true if this user has a remote/local camera or
+// screen-share tile already shown in #camera-grid. Used to suppress the
+// duplicate avatar placeholder in #channel-view-users.
+function userHasCameraTile(userID, username) {
+    const grid = document.getElementById('camera-grid');
+    if (!grid) return false;
+    const selfName = document.getElementById('self-avatar')?.dataset?.username;
+    if (username === selfName) {
+        if (grid.querySelector('#local-camera')) return true;
+        if (grid.querySelector('#local-screen-share')) return true;
+    }
+    const uid = String(userID);
+    if (grid.querySelector(`#remote-cam-camera-${uid}`)) return true;
+    if (grid.querySelector(`#remote-cam-screen-${uid}`)) return true;
+    if (grid.querySelector(`#remote-screen-share-screen-${uid}`)) return true;
+    return false;
+}
+
+// syncAvatarTileVisibility hides avatar tiles for users who already have a
+// video tile in #camera-grid, and re-shows them when the video tile is gone.
+// Also re-flows the grid columns so remaining avatar tiles look balanced.
+function syncAvatarTileVisibility() {
+    const container = document.getElementById('channel-view-users');
+    if (!container) return;
+    const grid = container.querySelector('.user-grid');
+    if (!grid) return;
+    let visible = 0;
+    grid.querySelectorAll('[data-user-id]').forEach(card => {
+        const uid = card.dataset.userId;
+        const uname = card.dataset.username;
+        if (userHasCameraTile(uid, uname)) {
+            card.style.display = 'none';
+        } else {
+            card.style.display = '';
+            visible++;
+        }
+    });
+    setMeetGridColumns(grid, Math.max(1, visible));
+}
+
 function updateMainContent(channelID, users) {
     const container = document.getElementById('channel-view-users');
     if (!container) return;
     users = (users || []).map(u => u.Muted ? { ...u, Speaking: false } : u);
     lastChannelUsers = users;
     if (document.body.classList.contains('expanded-tile-mode')) {
-        populateExpandedUsersRail();
+        // If the set of users changed (someone joined or left), rebuild the
+        // rail; otherwise just refresh speaking/muted indicators in place to
+        // avoid re-creating <video> elements on every presence update.
+        const railUserSig = users.map(u => String(u.ID)).sort().join('|');
+        if (railUserSig !== _lastRailUserSignature) {
+            _lastRailUserSignature = railUserSig;
+            populateExpandedUsersRail();
+        } else {
+            updateRailSpeakingState();
+        }
     }
     setTimeout(() => {
         attachUserPreviewsToCards();
         updateCallIndicators();
+        syncAvatarTileVisibility();
     }, 0);
 
     // Clean up camera grid for users who left
@@ -977,13 +1088,11 @@ function updateMainContent(channelID, users) {
     let grid = container.querySelector('.user-grid');
     if (!grid) {
         grid = document.createElement('div');
-        grid.className = 'user-grid grid gap-3 max-w-full';
-        grid.style.gridTemplateColumns = 'repeat(auto-fit, 160px)';
-        grid.style.justifyContent = 'center';
-        grid.style.alignContent = 'center';
+        grid.className = 'user-grid grid gap-3 w-full max-w-5xl mx-auto';
         container.innerHTML = '';
         container.appendChild(grid);
     }
+    setMeetGridColumns(grid, users.length);
 
     const existingCards = grid.querySelectorAll('[data-username]');
     const existingMap = {};
@@ -1004,8 +1113,8 @@ function updateMainContent(channelID, users) {
         if (existing) {
             // Update in place — only change classes/content that differ
             const lmuted = isLocalMuted(u.ID);
-            const border = u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/20' : 'border-vc-border';
-            existing.className = `flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/50 border ${border} transition-all duration-200 ${lmuted ? 'opacity-50' : ''}`;
+            const border = u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/30' : 'border-vc-border';
+            existing.className = `meet-tile relative aspect-video rounded-xl bg-vc-sidebar/60 border-2 ${border} transition-all duration-200 overflow-hidden ${lmuted ? 'opacity-50' : ''}`;
             const lmuteBtn = existing.querySelector('.local-mute-btn');
             if (lmuteBtn) {
                 lmuteBtn.textContent = lmuted ? 'Unmute' : 'Mute';
@@ -1014,14 +1123,14 @@ function updateMainContent(channelID, users) {
 
             const avatar = existing.querySelector('.avatar-circle');
             if (avatar) {
-                avatar.className = `avatar-circle w-16 h-16 rounded-full ${u.Speaking ? 'ring-4 ring-vc-green/30' : ''} overflow-hidden transition-all`;
+                avatar.className = `avatar-circle w-20 h-20 md:w-24 md:h-24 rounded-full ${u.Speaking ? 'ring-4 ring-vc-green/40' : ''} overflow-hidden transition-all`;
             }
 
             const muteIndicator = existing.querySelector('.mute-indicator');
             if (muteIndicator) muteIndicator.style.display = u.Muted ? '' : 'none';
 
             const nameEl = existing.querySelector('.user-name');
-            if (nameEl) nameEl.className = `user-name text-sm font-medium ${u.Muted ? 'text-vc-muted' : 'text-vc-text'}`;
+            if (nameEl) nameEl.className = `user-name text-sm font-medium ${u.Muted ? 'text-vc-muted' : 'text-white'}`;
 
             const speakingIndicator = existing.querySelector('.speaking-indicator');
             if (speakingIndicator) speakingIndicator.style.display = u.Speaking ? '' : 'none';
@@ -1036,34 +1145,35 @@ function updateMainContent(channelID, users) {
                     delete speakingLabel.dataset.active;
                 }
             }
-            const spacer = existing.querySelector('.speaking-spacer');
-            if (spacer) spacer.style.display = u.Speaking ? 'none' : '';
         } else {
-            // New user — create card with fade-in
+            // New user — create Meet-style 16:9 tile
             const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
             const isSelf = u.Username === selfName;
             const lmuted = isLocalMuted(u.ID);
             const card = document.createElement('div');
             card.dataset.username = u.Username;
             card.dataset.userId = u.ID;
-            card.className = `relative flex flex-col items-center gap-3 p-4 rounded-xl bg-vc-sidebar/50 border ${u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/20' : 'border-vc-border'} fade-in transition-all duration-200 ${lmuted ? 'opacity-50' : ''}`;
+            card.className = `meet-tile relative aspect-video rounded-xl bg-vc-sidebar/60 border-2 ${u.Speaking ? 'border-vc-green shadow-lg shadow-vc-green/30' : 'border-vc-border'} fade-in transition-all duration-200 overflow-hidden ${lmuted ? 'opacity-50' : ''}`;
             card.innerHTML = `
-                <div class="relative">
-                    <div class="avatar-circle w-16 h-16 rounded-full ${u.Speaking ? 'ring-4 ring-vc-green/30' : ''} overflow-hidden transition-all">
-                        <img src="${avatarURL(u.Username)}" alt="" class="w-full h-full">
+                <div class="absolute inset-0 flex items-center justify-center">
+                    <div class="relative">
+                        <div class="avatar-circle w-20 h-20 md:w-24 md:h-24 rounded-full ${u.Speaking ? 'ring-4 ring-vc-green/40' : ''} overflow-hidden transition-all">
+                            <img src="${avatarURL(u.Username)}" alt="" class="w-full h-full">
+                        </div>
+                        <div class="mute-indicator absolute -bottom-1 -right-1 w-7 h-7 rounded-full bg-vc-red flex items-center justify-center" style="display:${u.Muted ? '' : 'none'}"><svg class="w-3.5 h-3.5 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg></div>
                     </div>
-                    <div class="mute-indicator absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-vc-red flex items-center justify-center" style="display:${u.Muted ? '' : 'none'}"><svg class="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg></div>
                 </div>
-                <span class="user-name text-sm font-medium ${u.Muted ? 'text-vc-muted' : 'text-vc-text'}">${escapeHTML(u.Username)}</span>
-                ${!isSelf ? `<div class="flex gap-1">
-                    <button class="local-mute-btn text-[10px] px-2 py-0.5 rounded ${lmuted ? 'bg-vc-red/20 text-vc-red' : 'bg-vc-channel text-vc-muted hover:text-vc-red hover:bg-vc-red/10'} transition" onclick="toggleLocalMute(${u.ID}); updateMainContent(currentChannelID, lastChannelUsers);">${lmuted ? 'Unmute' : 'Mute'}</button>
-                    ${window.VOCALA_IS_ADMIN && !u.Muted ? `<button class="text-[10px] px-2 py-0.5 rounded bg-vc-channel text-vc-muted hover:text-vc-yellow hover:bg-vc-yellow/10 transition" onclick="forceMuteUser(${u.ID})" title="Force mute for everyone">Force</button>` : ''}
+                <div class="absolute bottom-2 left-2 right-2 flex items-center gap-2 z-10">
+                    <span class="user-name text-sm font-medium ${u.Muted ? 'text-vc-muted' : 'text-white'} drop-shadow truncate flex-1">${escapeHTML(u.Username)}</span>
+                    <div class="speaking-indicator flex items-center gap-1.5" style="display:${u.Speaking ? '' : 'none'}">
+                        <div class="flex items-end gap-0.5"><div class="w-1 h-2 bg-vc-green rounded-full animate-pulse"></div><div class="w-1 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.15s"></div><div class="w-1 h-2 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.3s"></div></div>
+                        <span class="speaking-label text-xs text-vc-green font-medium" data-active="${u.Speaking ? '1' : ''}">${u.Speaking ? randomSpeakingLabel() : ''}</span>
+                    </div>
+                </div>
+                ${!isSelf ? `<div class="absolute top-2 right-2 flex gap-1 opacity-0 hover:opacity-100 transition z-10" style="opacity:0" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0'">
+                    <button class="local-mute-btn text-[10px] px-2 py-0.5 rounded ${lmuted ? 'bg-vc-red/20 text-vc-red' : 'bg-black/60 text-white hover:bg-vc-red/40'} transition" onclick="toggleLocalMute(${u.ID}); updateMainContent(currentChannelID, lastChannelUsers);">${lmuted ? 'Unmute' : 'Mute'}</button>
+                    ${window.VOCALA_IS_ADMIN && !u.Muted ? `<button class="text-[10px] px-2 py-0.5 rounded bg-black/60 text-white hover:bg-vc-yellow/40 transition" onclick="forceMuteUser(${u.ID})" title="Force mute for everyone">Force</button>` : ''}
                 </div>` : ''}
-                <div class="speaking-indicator flex items-center gap-1.5" style="display:${u.Speaking ? '' : 'none'}">
-                    <div class="flex gap-0.5"><div class="w-1.5 h-3 bg-vc-green rounded-full animate-pulse"></div><div class="w-1.5 h-5 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.15s"></div><div class="w-1.5 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.3s"></div></div>
-                    <span class="speaking-label text-xs text-vc-green font-medium" data-active="${u.Speaking ? '1' : ''}">${u.Speaking ? randomSpeakingLabel() : ''}</span>
-                </div>
-                <div class="speaking-spacer h-5" style="display:${u.Speaking ? 'none' : ''}"></div>
             `;
             grid.appendChild(card);
         }
@@ -1758,9 +1868,8 @@ async function stopScreenShare() {
 }
 
 // Add a screen-share tile to the camera grid. Shared by local and remote
-// screen shares so they scale together with camera tiles. Screen tiles use
-// col-span-2 to appear roughly twice as wide as camera tiles (more real estate
-// for content) while still being part of the same responsive grid.
+// screen shares so they scale together with camera tiles. All tiles use the
+// same 16:9 footprint regardless of kind so the grid stays uniform.
 function addScreenTileToGrid({ id, stream, label, track }) {
     ensureCameraGrid();
     const grid = document.getElementById('camera-grid');
@@ -1781,7 +1890,7 @@ function addScreenTileToGrid({ id, stream, label, track }) {
 
     const wrapper = document.createElement('div');
     wrapper.id = id;
-    wrapper.className = 'rounded-xl overflow-hidden bg-black border-2 border-vc-accent aspect-video relative group cursor-pointer col-span-2';
+    wrapper.className = 'rounded-xl overflow-hidden bg-black border-2 border-vc-accent aspect-video relative group cursor-pointer';
     wrapper.dataset.tileType = 'screen';
 
     const video = document.createElement('video');
@@ -1823,10 +1932,22 @@ function addScreenTileToGrid({ id, stream, label, track }) {
     if (track) {
         track.onended = () => removeScreenTileFromGrid(id);
     }
+
+    // Auto-promote any new screen share to the main stage so it behaves like
+    // Google Meet: the moment someone starts sharing, the screen takes over
+    // and everyone else moves to the right rail. Don't override if the user
+    // has already pinned a different tile.
+    if (!expandedCamId) {
+        setCamViewMode(id, 'expanded');
+    } else if (expandedCamId !== id) {
+        previousMainTileId = expandedCamId;
+        setCamViewMode(id, 'expanded');
+    }
 }
 
 function removeScreenTileFromGrid(id) {
-    if (expandedCamId === id) {
+    const wasExpanded = expandedCamId === id;
+    if (wasExpanded) {
         document.body.classList.remove('expanded-tile-mode');
         expandedCamId = null;
         clearExpandedUsersRail();
@@ -1837,7 +1958,26 @@ function removeScreenTileFromGrid(id) {
         el.remove();
         updateGridColumns();
     }
+    if (wasExpanded) promoteNextMediaToMainStage();
     attachUserPreviewsToCards();
+}
+
+// promoteNextMediaToMainStage picks another live media tile and puts it on
+// the main stage (preferring the previous main, then any screen share, then
+// any camera). No-op if nothing is left.
+function promoteNextMediaToMainStage() {
+    const grid = document.getElementById('camera-grid');
+    if (!grid) return;
+    if (previousMainTileId && document.getElementById(previousMainTileId)) {
+        const id = previousMainTileId;
+        previousMainTileId = null;
+        setCamViewMode(id, 'expanded');
+        return;
+    }
+    const screen = grid.querySelector('[id^="remote-screen-share-"], #local-screen-share');
+    if (screen) { setCamViewMode(screen.id, 'expanded'); return; }
+    const cam = grid.querySelector('[id^="remote-cam-camera-"], #local-camera');
+    if (cam) { setCamViewMode(cam.id, 'expanded'); return; }
 }
 
 function showLocalScreenPreview(stream) {
@@ -1873,6 +2013,9 @@ function observeCameraGrid() {
     if (_cameraGridObserver) _cameraGridObserver.disconnect();
     _cameraGridObserver = new MutationObserver(() => {
         attachUserPreviewsToCards();
+        // If we were in expanded mode but the main-stage tile is gone (e.g.
+        // share ended), exit expanded mode cleanly. Grid mode is a valid
+        // alternative state — don't force-promote anyone back to main.
         if (document.body.classList.contains('expanded-tile-mode')) {
             const stillExpanded = grid.querySelector('.expanded-tile');
             if (!stillExpanded) {
@@ -1967,6 +2110,13 @@ function attachUserPreviewsToCards() {
     });
 }
 
+// populateExpandedUsersRail builds the right-side thumbnail rail used when a
+// tile is in expanded mode. Each thumbnail is either:
+//   - a 16:9 mini-tile mirroring a participant's live camera/screen (clones
+//     the same MediaStream into a small <video> so we don't open extra tracks)
+//   - a 16:9 avatar tile for participants without media.
+// Clicking a thumbnail brings that tile to the main stage and demotes the
+// current main-stage tile back into the rail (Meet-style swap).
 function populateExpandedUsersRail() {
     const rail = document.getElementById('expanded-users-rail');
     if (!rail) return;
@@ -1975,29 +2125,172 @@ function populateExpandedUsersRail() {
         if (!!b.Speaking - !!a.Speaking !== 0) return !!b.Speaking - !!a.Speaking;
         return (a.Username || '').localeCompare(b.Username || '');
     });
-    sorted.forEach(u => {
+    const grid = document.getElementById('camera-grid');
+    const selfName = document.getElementById('self-avatar')?.dataset?.username;
+
+    // Collect all media tiles (camera + screen) currently mounted, mapped
+    // by the user they belong to. A user can have both a camera and a screen
+    // share — each gets its own thumbnail.
+    const mediaTilesByUser = new Map(); // userID -> [{tileId, kind}]
+    if (grid) {
+        grid.querySelectorAll('[id]').forEach(el => {
+            const id = el.id;
+            let userKey = null, kind = null;
+            if (id.startsWith('remote-cam-camera-')) {
+                userKey = id.replace('remote-cam-camera-', '');
+                kind = 'camera';
+            } else if (id.startsWith('remote-screen-share-screen-')) {
+                userKey = id.replace('remote-screen-share-screen-', '');
+                kind = 'screen';
+            } else if (id.startsWith('remote-cam-screen-')) {
+                userKey = id.replace('remote-cam-screen-', '');
+                kind = 'screen';
+            } else if (id === 'local-camera' && selfName) {
+                userKey = `self:${selfName}`;
+                kind = 'camera';
+            } else if (id === 'local-screen-share' && selfName) {
+                userKey = `self:${selfName}`;
+                kind = 'screen';
+            }
+            if (userKey == null) return;
+            if (!mediaTilesByUser.has(userKey)) mediaTilesByUser.set(userKey, []);
+            mediaTilesByUser.get(userKey).push({ tileId: id, kind });
+        });
+    }
+
+    const addThumb = (u, opts) => {
+        opts = opts || {};
         const card = document.createElement('div');
         card.dataset.userId = u.ID;
-        const muted = u.Muted ? '<svg class="w-3 h-3 text-vc-red flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : '';
-        const speakingBars = u.Speaking
-            ? '<div class="flex items-end gap-0.5 flex-shrink-0 h-3"><div class="w-0.5 h-1.5 bg-vc-green rounded-full animate-pulse"></div><div class="w-0.5 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.1s"></div><div class="w-0.5 h-2 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.2s"></div></div>'
-            : '';
+        if (opts.tileId) card.dataset.tileId = opts.tileId;
         const ring = u.Speaking ? 'ring-2 ring-vc-green/60' : '';
-        const bg = u.Speaking ? 'bg-vc-green/10 border border-vc-green/30' : 'bg-vc-channel/60 hover:bg-vc-channel border border-transparent';
-        card.className = `flex items-center gap-2 px-2 py-1.5 rounded-md transition ${bg}`;
-        card.innerHTML = `
-            <img src="${avatarURL(u.Username)}" alt="" class="w-6 h-6 rounded-full flex-shrink-0 ${ring}">
-            <span class="text-xs text-vc-text truncate flex-1">${escapeHTML(u.Username)}</span>
-            ${speakingBars}
-            ${muted}
-        `;
+        const isMain = expandedCamId && expandedCamId === opts.tileId;
+        const border = u.Speaking
+            ? 'border-vc-green shadow-lg shadow-vc-green/30'
+            : (isMain ? 'border-vc-accent' : 'border-vc-border');
+        card.className = `relative aspect-video rounded-lg overflow-hidden bg-black/80 border-2 ${border} cursor-pointer hover:border-vc-accent transition`;
+        const labelChip = `
+            <div class="absolute bottom-1 left-1 right-1 flex items-center gap-1 text-[10px] z-10">
+                <span class="truncate text-white drop-shadow flex-1">${escapeHTML(u.Username)}${opts.kind === 'screen' ? ' · screen' : ''}</span>
+                ${u.Muted ? '<svg class="w-3 h-3 text-vc-red flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : ''}
+            </div>`;
+        if (opts.tileId) {
+            // Clone the live MediaStream into a new <video> so the thumbnail
+            // shares decoding with the main tile.
+            const srcEl = document.getElementById(opts.tileId);
+            const srcVideo = srcEl ? srcEl.querySelector('video') : null;
+            card.innerHTML = `
+                <video autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover ${opts.tileId === 'local-camera' ? '' : ''}"></video>
+                ${labelChip}
+            `;
+            const v = card.querySelector('video');
+            if (srcVideo && srcVideo.srcObject) {
+                try { v.srcObject = srcVideo.srcObject; v.play().catch(() => {}); } catch (_) {}
+            }
+            if (opts.tileId === 'local-camera') {
+                v.style.transform = 'scaleX(-1)';
+            }
+            card.addEventListener('click', () => swapMainStageWith(opts.tileId));
+        } else {
+            // Avatar-only thumbnail
+            card.innerHTML = `
+                <div class="absolute inset-0 flex items-center justify-center bg-vc-sidebar/70">
+                    <img src="${avatarURL(u.Username)}" alt="" class="w-12 h-12 rounded-full ${ring}">
+                </div>
+                ${labelChip}
+            `;
+        }
         rail.appendChild(card);
+    };
+
+    sorted.forEach(u => {
+        const isSelf = u.Username === selfName;
+        const key = isSelf ? `self:${u.Username}` : String(u.ID);
+        const tiles = mediaTilesByUser.get(key);
+        if (tiles && tiles.length > 0) {
+            tiles.forEach(t => addThumb(u, t));
+        } else {
+            addThumb(u, {});
+        }
     });
 }
+
+// updateRailMainStageHighlight rewrites just the border class on rail cards
+// to reflect the current main-stage tile, without rebuilding any DOM. Keeps
+// the cloned <video> elements stable so they don't flash black on swap.
+function updateRailMainStageHighlight() {
+    const rail = document.getElementById('expanded-users-rail');
+    if (!rail) return;
+    rail.querySelectorAll('[data-tile-id]').forEach(card => {
+        const isMain = expandedCamId && card.dataset.tileId === expandedCamId;
+        // Don't override the speaking-green highlight which has priority.
+        if (card.className.includes('border-vc-green')) return;
+        card.className = card.className
+            .replace(/border-vc-(accent|border)\b/g, '')
+            .trim();
+        card.className = (card.className + ' ' + (isMain ? 'border-vc-accent' : 'border-vc-border')).replace(/\s+/g, ' ');
+    });
+}
+
+// updateRailSpeakingState rewrites the border class on existing rail cards
+// without rebuilding them — keeps the cloned MediaStream <video> elements
+// stable while still reflecting who's currently speaking.
+function updateRailSpeakingState() {
+    const rail = document.getElementById('expanded-users-rail');
+    if (!rail) return;
+    const speakingByUser = new Map();
+    const mutedByUser = new Map();
+    (lastChannelUsers || []).forEach(u => {
+        speakingByUser.set(String(u.ID), !!u.Speaking && !u.Muted);
+        mutedByUser.set(String(u.ID), !!u.Muted);
+    });
+    rail.querySelectorAll('[data-user-id]').forEach(card => {
+        const uid = card.dataset.userId;
+        const speaking = speakingByUser.get(uid);
+        const isMain = expandedCamId && card.dataset.tileId === expandedCamId;
+        // Strip old border modifiers
+        card.className = card.className
+            .replace(/border-vc-(green|accent|border)\b/g, '')
+            .replace(/shadow-lg/g, '')
+            .replace(/shadow-vc-green\/[0-9]+/g, '');
+        const next = speaking
+            ? 'border-vc-green shadow-lg shadow-vc-green/30'
+            : (isMain ? 'border-vc-accent' : 'border-vc-border');
+        card.className = (card.className.trim() + ' ' + next).replace(/\s+/g, ' ');
+        // Sync muted icon visibility
+        const muted = mutedByUser.get(uid);
+        const mutedSvg = card.querySelector('.absolute.bottom-1 svg.text-vc-red');
+        if (muted && !mutedSvg) {
+            const chip = card.querySelector('.absolute.bottom-1');
+            if (chip) {
+                chip.insertAdjacentHTML('beforeend', '<svg class="w-3 h-3 text-vc-red flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>');
+            }
+        } else if (!muted && mutedSvg) {
+            mutedSvg.remove();
+        }
+    });
+}
+
+// swapMainStageWith promotes the given tile id (from camera-grid) to the
+// expanded main stage. The previously-main tile is collapsed back to its
+// regular slot in #camera-grid (and reappears as a thumbnail in the rail).
+function swapMainStageWith(tileId) {
+    if (!tileId || expandedCamId === tileId) return;
+    if (expandedCamId && expandedCamId !== tileId) {
+        previousMainTileId = expandedCamId;
+    }
+    setCamViewMode(tileId, 'expanded');
+}
+
+// previousMainTileId tracks the last tile that occupied the main stage so
+// "Return to last share" can swap it back.
+let previousMainTileId = null;
 
 function clearExpandedUsersRail() {
     const rail = document.getElementById('expanded-users-rail');
     if (rail) rail.innerHTML = '';
+    _lastRailTilesSignature = '';
+    _lastRailUserSignature = '';
 }
 
 function toggleExpandedUsersRail() {
@@ -2250,7 +2543,39 @@ function updateGridColumns() {
         cls = 'grid grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-1.5 mb-4 w-full mx-auto';
     }
     grid.className = cls;
+    syncAvatarTileVisibility();
+    // Rebuild the rail only when the set of tile IDs actually changes —
+    // otherwise rebuilding on every presence tick re-creates the cloned
+    // <video> elements and they flash black for a frame.
+    if (document.body.classList.contains('expanded-tile-mode')) {
+        const ids = Array.from(grid.children).map(el => el.id).sort().join('|');
+        if (ids !== _lastRailTilesSignature) {
+            _lastRailTilesSignature = ids;
+            populateExpandedUsersRail();
+        }
+    }
 }
+
+// ensureExpandedMode is the single source of truth for the "main stage +
+// rail" layout invariant: if there is ANY media tile in #camera-grid, we
+// must be in expanded-tile-mode with one of those tiles on the main stage.
+// Called from every code path that mutates the grid or the presence state.
+function ensureExpandedMode() {
+    const grid = document.getElementById('camera-grid');
+    if (!grid || grid.children.length === 0) return;
+    const expandedEl = expandedCamId ? document.getElementById(expandedCamId) : null;
+    const expandedAlive = expandedEl && grid.contains(expandedEl);
+    if (!expandedAlive) {
+        expandedCamId = null;
+        promoteNextMediaToMainStage();
+    }
+    if (expandedCamId && !document.body.classList.contains('expanded-tile-mode')) {
+        setCamViewMode(expandedCamId, 'expanded');
+    }
+}
+
+let _lastRailTilesSignature = '';
+let _lastRailUserSignature = '';
 
 function addLocalCameraToGrid() {
     ensureCameraGrid();
@@ -2308,6 +2633,10 @@ function addLocalCameraToGrid() {
     // Local camera always first
     grid.prepend(wrapper);
     updateGridColumns();
+
+    if (!expandedCamId) {
+        setCamViewMode('local-camera', 'expanded');
+    }
 }
 
 function handleRemoteCameraTrack(stream, track, mid) {
@@ -2373,6 +2702,13 @@ function handleRemoteCameraTrack(stream, track, mid) {
     grid.appendChild(wrapper);
     updateGridColumns();
 
+    // Auto-promote the first camera tile to the main stage (Meet-like behaviour).
+    // If something is already expanded (e.g. an ongoing screen share), don't
+    // override — just leave the new camera as a thumbnail in the rail.
+    if (!expandedCamId) {
+        setCamViewMode(camId, 'expanded');
+    }
+
     track.onended = () => removeFromCameraGrid(camId);
 
     let muteTimer = null;
@@ -2391,6 +2727,18 @@ function setCamViewMode(camId, mode) {
     const wrapper = document.getElementById(camId);
     if (!wrapper) return;
 
+    // Clicking the same already-expanded tile in expanded mode is a no-op;
+    // without this guard re-entering the expanded branch double-adds the
+    // close / rail / fs / previous-share buttons each time. We still need
+    // to re-run the branch if body lost its expanded-tile-mode class (eg.
+    // it was stripped after a screen_off that didn't pick the next tile).
+    if (mode === 'expanded'
+        && expandedCamId === camId
+        && wrapper.classList.contains('expanded-tile')
+        && document.body.classList.contains('expanded-tile-mode')) {
+        return;
+    }
+
     // Reset previous expanded
     if (expandedCamId && expandedCamId !== camId) {
         const prev = document.getElementById(expandedCamId);
@@ -2408,6 +2756,8 @@ function setCamViewMode(camId, mode) {
             prev.style.height = '';
             prev.dataset.expanded = '';
             prev.className = prev.className.replace('fixed', '').trim();
+            // Strip control buttons we add only to the main-stage tile.
+            prev.querySelectorAll('.cam-close-btn, .cam-rail-btn, .cam-fs-btn, .cam-prev-btn').forEach(el => el.remove());
         }
         expandedCamId = null;
     }
@@ -2430,12 +2780,7 @@ function setCamViewMode(camId, mode) {
         clearExpandedUsersRail();
         const video = wrapper.querySelector('video');
         if (video) video.className = 'w-full h-full object-cover';
-        const closeBtn = wrapper.querySelector('.cam-close-btn');
-        if (closeBtn) closeBtn.remove();
-        const railBtn = wrapper.querySelector('.cam-rail-btn');
-        if (railBtn) railBtn.remove();
-        const fsBtn = wrapper.querySelector('.cam-fs-btn');
-        if (fsBtn) fsBtn.remove();
+        wrapper.querySelectorAll('.cam-close-btn, .cam-rail-btn, .cam-fs-btn, .cam-prev-btn').forEach(el => el.remove());
     } else if (mode === 'expanded') {
         wrapper.classList.add('expanded-tile');
         wrapper.style.position = '';
@@ -2449,21 +2794,23 @@ function setCamViewMode(camId, mode) {
         wrapper.style.width = '';
         wrapper.style.height = '';
         wrapper.dataset.expanded = 'true';
+        const wasInExpandedMode = document.body.classList.contains('expanded-tile-mode');
         expandedCamId = camId;
         document.body.classList.add('expanded-tile-mode');
-        populateExpandedUsersRail();
+        // If we were already in expanded mode (this is a swap, not a first
+        // enter), avoid rebuilding the rail — that would re-create cloned
+        // <video> elements and flash black for a frame. Just retarget the
+        // main-stage highlight.
+        if (wasInExpandedMode) {
+            updateRailMainStageHighlight();
+        } else {
+            populateExpandedUsersRail();
+        }
         const video = wrapper.querySelector('video');
         if (video) video.className = 'w-full h-full object-contain';
-        // Add close button (always visible)
-        let closeBtn = wrapper.querySelector('.cam-close-btn');
-        if (!closeBtn) {
-            closeBtn = document.createElement('button');
-            closeBtn.className = 'cam-close-btn absolute top-4 right-4 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
-            closeBtn.title = 'Exit (Esc)';
-            closeBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
-            closeBtn.onclick = (e) => { e.stopPropagation(); setCamViewMode(camId, 'default'); };
-            wrapper.appendChild(closeBtn);
-        }
+        // No close button in Meet-style — the main stage always shows whoever
+        // is the active speaker / sharer; switching is done by clicking a
+        // thumbnail in the right rail.
         let railBtn = wrapper.querySelector('.cam-rail-btn');
         if (!railBtn) {
             railBtn = document.createElement('button');
@@ -2489,6 +2836,25 @@ function setCamViewMode(camId, mode) {
         };
             wrapper.appendChild(fsBtn);
         }
+        // "Return to last share" — only when we have a previous main tile that
+        // is still mounted in the grid.
+        const prevExists = previousMainTileId && document.getElementById(previousMainTileId);
+        let prevBtn = wrapper.querySelector('.cam-prev-btn');
+        if (prevExists && previousMainTileId !== camId) {
+            if (!prevBtn) {
+                prevBtn = document.createElement('button');
+                prevBtn.className = 'cam-prev-btn absolute top-4 left-4 z-20 flex items-center gap-1.5 px-3 py-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition text-sm';
+                prevBtn.title = 'Return to previous share';
+                prevBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg><span>Previous share</span>';
+                prevBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    swapMainStageWith(previousMainTileId);
+                };
+                wrapper.appendChild(prevBtn);
+            }
+        } else if (prevBtn) {
+            prevBtn.remove();
+        }
         updateFullscreenButtonsIcon();
     } else if (mode === 'fullscreen') {
         if (!wrapper.classList.contains('expanded-tile')) {
@@ -2503,18 +2869,18 @@ function setCamViewMode(camId, mode) {
     }
 }
 
-// ESC to exit expanded camera
+// ESC only exits browser fullscreen now — collapsing to grid is no longer a
+// goal in Meet-style layout (main stage is always occupied).
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && expandedCamId) {
-        setCamViewMode(expandedCamId, 'default');
+    if (e.key === 'Escape' && document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {});
     }
 });
 
 function removeFromCameraGrid(id) {
-    if (expandedCamId === id) {
-        document.body.classList.remove('expanded-tile-mode');
+    const wasMain = expandedCamId === id;
+    if (wasMain) {
         expandedCamId = null;
-        clearExpandedUsersRail();
     }
     const el = document.getElementById(id);
     if (el) el.remove();
@@ -2523,6 +2889,13 @@ function removeFromCameraGrid(id) {
         grid.remove();
     } else {
         updateGridColumns();
+    }
+    if (wasMain) {
+        promoteNextMediaToMainStage();
+        if (!expandedCamId) {
+            document.body.classList.remove('expanded-tile-mode');
+            clearExpandedUsersRail();
+        }
     }
     attachUserPreviewsToCards();
 }
