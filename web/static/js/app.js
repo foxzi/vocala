@@ -618,9 +618,6 @@ function updateChannelUsers(channelID, users) {
                     <span class="sb-name flex-1 truncate ${u.Muted ? 'text-vc-muted line-through' : 'text-vc-text'}">${escapeHTML(u.Username)}</span>
                     <svg class="sb-mute w-3 h-3 text-vc-red" fill="currentColor" viewBox="0 0 24 24" style="display:${u.Muted ? '' : 'none'}"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>
                     <div class="sb-speaking flex gap-0.5" style="display:${u.Speaking ? '' : 'none'}"><div class="w-1 h-3 bg-vc-accent rounded-full animate-pulse"></div><div class="w-1 h-4 bg-vc-accent rounded-full animate-pulse" style="animation-delay:0.1s"></div><div class="w-1 h-2 bg-vc-accent rounded-full animate-pulse" style="animation-delay:0.2s"></div></div>
-                    ${!isSelf ? `<button class="sb-huddle-btn ml-2 invisible group-hover:visible text-vc-muted hover:text-vc-accent transition" title="Start huddle" onclick="event.stopPropagation(); startHuddle(${u.ID})">
-                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/></svg>
-                    </button>` : ''}
                 `;
                 container.appendChild(div);
             }
@@ -3418,19 +3415,9 @@ function renderDMList(items) {
             <div class="flex-1 min-w-0">
                 <div class="dm-name text-sm font-medium text-vc-text truncate"></div>
             </div>
-            <button title="Start huddle" class="dm-huddle-btn ml-2 invisible group-hover:visible text-vc-muted hover:text-vc-accent transition flex-shrink-0">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/></svg>
-            </button>
         `;
         row.querySelector('.dm-name').textContent = d.other_name;
         row.addEventListener('click', () => openDMChannel(d.channel_id, d.other_name));
-        const huddleBtn = row.querySelector('.dm-huddle-btn');
-        if (huddleBtn) {
-            huddleBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                startHuddle(d.other_user_id);
-            });
-        }
         root.appendChild(row);
     });
     updateCallIndicators();
@@ -3491,6 +3478,20 @@ function dmHasActiveHuddle(channelID) {
     return users.some(u => u.Username !== selfName);
 }
 
+// userIsInAnyCall returns true if the user with the given id is currently
+// in voice presence in any channel (regular channel, group huddle, or DM
+// huddle). Used to surface a "headphones" badge in the DM list so you can
+// see at a glance who is on a call right now.
+function userIsInAnyCall(userID) {
+    if (!userID) return false;
+    const uid = Number(userID);
+    for (const id of Object.keys(channelUsersData)) {
+        const list = channelUsersData[id] || [];
+        if (list.some(u => Number(u.ID) === uid)) return true;
+    }
+    return false;
+}
+
 function rejoinActiveHuddle(channelID, displayName) {
     isDMHuddleActive = true;
     currentChannelID = null;
@@ -3500,14 +3501,18 @@ function rejoinActiveHuddle(channelID, displayName) {
 function updateActiveHuddleBadges() {
     document.querySelectorAll('#dm-list [data-dm-channel]').forEach(row => {
         const id = parseInt(row.dataset.dmChannel, 10);
+        const otherId = parseInt(row.dataset.otherId, 10);
         let badge = row.querySelector('.dm-active-huddle');
         const hasCallBadge = !!row.querySelector('.dm-call-badge');
-        if (dmHasActiveHuddle(id) && !hasCallBadge) {
+        // Show headphones if there's an active huddle in this DM OR the
+        // other user is currently in a call somewhere else (channel/group).
+        const showBadge = !hasCallBadge && (dmHasActiveHuddle(id) || userIsInAnyCall(otherId));
+        if (showBadge) {
             if (!badge) {
                 badge = document.createElement('span');
-                badge.className = 'dm-active-huddle flex-shrink-0 inline-flex items-center justify-center w-[20px] h-[20px] rounded-full bg-vc-green text-white animate-pulse';
-                badge.title = 'Active huddle';
-                badge.innerHTML = '<svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M6.62 10.79a15.5 15.5 0 006.59 6.59l2.2-2.2a1 1 0 011.02-.24 11.4 11.4 0 003.57.57 1 1 0 011 1V20a1 1 0 01-1 1A17 17 0 013 4a1 1 0 011-1h3.5a1 1 0 011 1 11.4 11.4 0 00.57 3.57 1 1 0 01-.24 1.02l-2.21 2.2z"/></svg>';
+                badge.className = 'dm-active-huddle flex-shrink-0 inline-flex items-center justify-center w-[20px] h-[20px] rounded-full bg-vc-accent/15 text-vc-accent';
+                badge.title = 'On a call';
+                badge.innerHTML = '<svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M12 3a9 9 0 00-9 9v6a3 3 0 003 3h3v-8H5v-1a7 7 0 0114 0v1h-4v8h3a3 3 0 003-3v-6a9 9 0 00-9-9z"/></svg>';
                 row.insertBefore(badge, row.querySelector('button'));
             }
         } else if (badge) {
