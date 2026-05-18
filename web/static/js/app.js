@@ -367,8 +367,6 @@ function handleWSMessage(msg) {
             if (typeof bumpDMUnread === 'function' && msg.kind !== 'system' && fromOther) {
                 bumpDMUnread(msg.channel_id);
             }
-            // Bump the in-call chat button badge when the panel is hidden and
-            // the message belongs to the currently-active channel.
             if (fromOther && msg.kind !== 'system' && msg.channel_id === currentChannelID && isInCallChatPanelHidden()) {
                 inCallChatUnread++;
                 updateChatButtonBadge();
@@ -465,9 +463,6 @@ function handleWSMessage(msg) {
                     });
                     updateGridColumns();
                 }
-                // If the removed screen was the main stage, promote whatever is
-                // left (a camera, the previous main, etc.) so we don't end up
-                // with a blank main and live thumbnails in the rail.
                 const wasMainGone = expandedCamId && !document.getElementById(expandedCamId);
                 if (wasMainGone) {
                     expandedCamId = null;
@@ -660,7 +655,6 @@ function toggleSidebar() {
     }
 }
 
-// Per-channel unread counter for messages received while the chat panel is hidden.
 let inCallChatUnread = 0;
 
 function toggleMobileChat() {
@@ -670,12 +664,10 @@ function toggleMobileChat() {
     panel.classList.remove('hidden', 'chat-hidden');
     panel.classList.add('flex');
     if (!wasHidden) {
-        // Closing
         panel.classList.add('hidden', 'chat-hidden');
         panel.classList.remove('flex');
         return;
     }
-    // Opening — reset unread counter and scroll to bottom
     inCallChatUnread = 0;
     updateChatButtonBadge();
     const msgs = document.getElementById('chat-messages');
@@ -689,9 +681,6 @@ function isInCallChatPanelHidden() {
 }
 
 function updateChatButtonBadge() {
-    // Target the bar chat button specifically — there is another chat-toggle
-    // button inside the chat panel header which is hidden while the panel is
-    // closed; a generic selector would land on the wrong one.
     const btn = document.getElementById('bar-chat-btn');
     if (!btn) return;
     let badge = btn.querySelector('.chat-unread-badge');
@@ -981,8 +970,6 @@ function hideResumeScreenBanner() {
 
 let lastChannelUsers = [];
 
-// setMeetGridColumns picks a Google-Meet-like column count based on
-// number of tiles, so each tile keeps a roughly square-ish 16:9 ratio.
 function setMeetGridColumns(grid, count) {
     let cols;
     if (count <= 1) cols = 1;
@@ -993,9 +980,6 @@ function setMeetGridColumns(grid, count) {
     grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
 }
 
-// userHasCameraTile returns true if this user has a remote/local camera or
-// screen-share tile already shown in #camera-grid. Used to suppress the
-// duplicate avatar placeholder in #channel-view-users.
 function userHasCameraTile(userID, username) {
     const grid = document.getElementById('camera-grid');
     if (!grid) return false;
@@ -1011,9 +995,6 @@ function userHasCameraTile(userID, username) {
     return false;
 }
 
-// syncAvatarTileVisibility hides avatar tiles for users who already have a
-// video tile in #camera-grid, and re-shows them when the video tile is gone.
-// Also re-flows the grid columns so remaining avatar tiles look balanced.
 function syncAvatarTileVisibility() {
     const container = document.getElementById('channel-view-users');
     if (!container) return;
@@ -1039,9 +1020,6 @@ function updateMainContent(channelID, users) {
     users = (users || []).map(u => u.Muted ? { ...u, Speaking: false } : u);
     lastChannelUsers = users;
     if (document.body.classList.contains('expanded-tile-mode')) {
-        // If the set of users changed (someone joined or left), rebuild the
-        // rail; otherwise just refresh speaking/muted indicators in place to
-        // avoid re-creating <video> elements on every presence update.
         const railUserSig = users.map(u => String(u.ID)).sort().join('|');
         if (railUserSig !== _lastRailUserSignature) {
             _lastRailUserSignature = railUserSig;
@@ -1143,7 +1121,6 @@ function updateMainContent(channelID, users) {
                 }
             }
         } else {
-            // New user — create Meet-style 16:9 tile
             const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
             const isSelf = u.Username === selfName;
             const lmuted = isLocalMuted(u.ID);
@@ -1864,9 +1841,6 @@ async function stopScreenShare() {
     updateScreenShareUI();
 }
 
-// Add a screen-share tile to the camera grid. Shared by local and remote
-// screen shares so they scale together with camera tiles. All tiles use the
-// same 16:9 footprint regardless of kind so the grid stays uniform.
 function addScreenTileToGrid({ id, stream, label, track }) {
     ensureCameraGrid();
     const grid = document.getElementById('camera-grid');
@@ -1930,10 +1904,6 @@ function addScreenTileToGrid({ id, stream, label, track }) {
         track.onended = () => removeScreenTileFromGrid(id);
     }
 
-    // Auto-promote any new screen share to the main stage so it behaves like
-    // Google Meet: the moment someone starts sharing, the screen takes over
-    // and everyone else moves to the right rail. Don't override if the user
-    // has already pinned a different tile.
     if (!expandedCamId) {
         setCamViewMode(id, 'expanded');
     } else if (expandedCamId !== id) {
@@ -1959,9 +1929,6 @@ function removeScreenTileFromGrid(id) {
     attachUserPreviewsToCards();
 }
 
-// promoteNextMediaToMainStage picks another live media tile and puts it on
-// the main stage (preferring the previous main, then any screen share, then
-// any camera). No-op if nothing is left.
 function promoteNextMediaToMainStage() {
     const grid = document.getElementById('camera-grid');
     if (!grid) return;
@@ -2010,9 +1977,6 @@ function observeCameraGrid() {
     if (_cameraGridObserver) _cameraGridObserver.disconnect();
     _cameraGridObserver = new MutationObserver(() => {
         attachUserPreviewsToCards();
-        // If we were in expanded mode but the main-stage tile is gone (e.g.
-        // share ended), exit expanded mode cleanly. Grid mode is a valid
-        // alternative state — don't force-promote anyone back to main.
         if (document.body.classList.contains('expanded-tile-mode')) {
             const stillExpanded = grid.querySelector('.expanded-tile');
             if (!stillExpanded) {
@@ -2107,13 +2071,6 @@ function attachUserPreviewsToCards() {
     });
 }
 
-// populateExpandedUsersRail builds the right-side thumbnail rail used when a
-// tile is in expanded mode. Each thumbnail is either:
-//   - a 16:9 mini-tile mirroring a participant's live camera/screen (clones
-//     the same MediaStream into a small <video> so we don't open extra tracks)
-//   - a 16:9 avatar tile for participants without media.
-// Clicking a thumbnail brings that tile to the main stage and demotes the
-// current main-stage tile back into the rail (Meet-style swap).
 function populateExpandedUsersRail() {
     const rail = document.getElementById('expanded-users-rail');
     if (!rail) return;
@@ -2125,10 +2082,7 @@ function populateExpandedUsersRail() {
     const grid = document.getElementById('camera-grid');
     const selfName = document.getElementById('self-avatar')?.dataset?.username;
 
-    // Collect all media tiles (camera + screen) currently mounted, mapped
-    // by the user they belong to. A user can have both a camera and a screen
-    // share — each gets its own thumbnail.
-    const mediaTilesByUser = new Map(); // userID -> [{tileId, kind}]
+    const mediaTilesByUser = new Map();
     if (grid) {
         grid.querySelectorAll('[id]').forEach(el => {
             const id = el.id;
@@ -2172,8 +2126,6 @@ function populateExpandedUsersRail() {
                 ${u.Muted ? '<svg class="w-3 h-3 text-vc-red flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : ''}
             </div>`;
         if (opts.tileId) {
-            // Clone the live MediaStream into a new <video> so the thumbnail
-            // shares decoding with the main tile.
             const srcEl = document.getElementById(opts.tileId);
             const srcVideo = srcEl ? srcEl.querySelector('video') : null;
             card.innerHTML = `
@@ -2189,7 +2141,6 @@ function populateExpandedUsersRail() {
             }
             card.addEventListener('click', () => swapMainStageWith(opts.tileId));
         } else {
-            // Avatar-only thumbnail
             card.innerHTML = `
                 <div class="absolute inset-0 flex items-center justify-center bg-vc-sidebar/70">
                     <img src="${avatarURL(u.Username)}" alt="" class="w-12 h-12 rounded-full ${ring}">
@@ -2212,15 +2163,11 @@ function populateExpandedUsersRail() {
     });
 }
 
-// updateRailMainStageHighlight rewrites just the border class on rail cards
-// to reflect the current main-stage tile, without rebuilding any DOM. Keeps
-// the cloned <video> elements stable so they don't flash black on swap.
 function updateRailMainStageHighlight() {
     const rail = document.getElementById('expanded-users-rail');
     if (!rail) return;
     rail.querySelectorAll('[data-tile-id]').forEach(card => {
         const isMain = expandedCamId && card.dataset.tileId === expandedCamId;
-        // Don't override the speaking-green highlight which has priority.
         if (card.className.includes('border-vc-green')) return;
         card.className = card.className
             .replace(/border-vc-(accent|border)\b/g, '')
@@ -2229,9 +2176,6 @@ function updateRailMainStageHighlight() {
     });
 }
 
-// updateRailSpeakingState rewrites the border class on existing rail cards
-// without rebuilding them — keeps the cloned MediaStream <video> elements
-// stable while still reflecting who's currently speaking.
 function updateRailSpeakingState() {
     const rail = document.getElementById('expanded-users-rail');
     if (!rail) return;
@@ -2245,7 +2189,6 @@ function updateRailSpeakingState() {
         const uid = card.dataset.userId;
         const speaking = speakingByUser.get(uid);
         const isMain = expandedCamId && card.dataset.tileId === expandedCamId;
-        // Strip old border modifiers
         card.className = card.className
             .replace(/border-vc-(green|accent|border)\b/g, '')
             .replace(/shadow-lg/g, '')
@@ -2254,7 +2197,6 @@ function updateRailSpeakingState() {
             ? 'border-vc-green shadow-lg shadow-vc-green/30'
             : (isMain ? 'border-vc-accent' : 'border-vc-border');
         card.className = (card.className.trim() + ' ' + next).replace(/\s+/g, ' ');
-        // Sync muted icon visibility
         const muted = mutedByUser.get(uid);
         const mutedSvg = card.querySelector('.absolute.bottom-1 svg.text-vc-red');
         if (muted && !mutedSvg) {
@@ -2268,9 +2210,6 @@ function updateRailSpeakingState() {
     });
 }
 
-// swapMainStageWith promotes the given tile id (from camera-grid) to the
-// expanded main stage. The previously-main tile is collapsed back to its
-// regular slot in #camera-grid (and reappears as a thumbnail in the rail).
 function swapMainStageWith(tileId) {
     if (!tileId || expandedCamId === tileId) return;
     if (expandedCamId && expandedCamId !== tileId) {
@@ -2279,8 +2218,6 @@ function swapMainStageWith(tileId) {
     setCamViewMode(tileId, 'expanded');
 }
 
-// previousMainTileId tracks the last tile that occupied the main stage so
-// "Return to last share" can swap it back.
 let previousMainTileId = null;
 
 function clearExpandedUsersRail() {
@@ -2541,9 +2478,6 @@ function updateGridColumns() {
     }
     grid.className = cls;
     syncAvatarTileVisibility();
-    // Rebuild the rail only when the set of tile IDs actually changes —
-    // otherwise rebuilding on every presence tick re-creates the cloned
-    // <video> elements and they flash black for a frame.
     if (document.body.classList.contains('expanded-tile-mode')) {
         const ids = Array.from(grid.children).map(el => el.id).sort().join('|');
         if (ids !== _lastRailTilesSignature) {
@@ -2553,10 +2487,6 @@ function updateGridColumns() {
     }
 }
 
-// ensureExpandedMode is the single source of truth for the "main stage +
-// rail" layout invariant: if there is ANY media tile in #camera-grid, we
-// must be in expanded-tile-mode with one of those tiles on the main stage.
-// Called from every code path that mutates the grid or the presence state.
 function ensureExpandedMode() {
     const grid = document.getElementById('camera-grid');
     if (!grid || grid.children.length === 0) return;
@@ -2699,9 +2629,6 @@ function handleRemoteCameraTrack(stream, track, mid) {
     grid.appendChild(wrapper);
     updateGridColumns();
 
-    // Auto-promote the first camera tile to the main stage (Meet-like behaviour).
-    // If something is already expanded (e.g. an ongoing screen share), don't
-    // override — just leave the new camera as a thumbnail in the rail.
     if (!expandedCamId) {
         setCamViewMode(camId, 'expanded');
     }
@@ -2724,11 +2651,6 @@ function setCamViewMode(camId, mode) {
     const wrapper = document.getElementById(camId);
     if (!wrapper) return;
 
-    // Clicking the same already-expanded tile in expanded mode is a no-op;
-    // without this guard re-entering the expanded branch double-adds the
-    // close / rail / fs / previous-share buttons each time. We still need
-    // to re-run the branch if body lost its expanded-tile-mode class (eg.
-    // it was stripped after a screen_off that didn't pick the next tile).
     if (mode === 'expanded'
         && expandedCamId === camId
         && wrapper.classList.contains('expanded-tile')
@@ -2753,7 +2675,6 @@ function setCamViewMode(camId, mode) {
             prev.style.height = '';
             prev.dataset.expanded = '';
             prev.className = prev.className.replace('fixed', '').trim();
-            // Strip control buttons we add only to the main-stage tile.
             prev.querySelectorAll('.cam-close-btn, .cam-rail-btn, .cam-fs-btn, .cam-prev-btn').forEach(el => el.remove());
         }
         expandedCamId = null;
@@ -2794,10 +2715,6 @@ function setCamViewMode(camId, mode) {
         const wasInExpandedMode = document.body.classList.contains('expanded-tile-mode');
         expandedCamId = camId;
         document.body.classList.add('expanded-tile-mode');
-        // If we were already in expanded mode (this is a swap, not a first
-        // enter), avoid rebuilding the rail — that would re-create cloned
-        // <video> elements and flash black for a frame. Just retarget the
-        // main-stage highlight.
         if (wasInExpandedMode) {
             updateRailMainStageHighlight();
         } else {
@@ -2805,9 +2722,6 @@ function setCamViewMode(camId, mode) {
         }
         const video = wrapper.querySelector('video');
         if (video) video.className = 'w-full h-full object-contain';
-        // No close button in Meet-style — the main stage always shows whoever
-        // is the active speaker / sharer; switching is done by clicking a
-        // thumbnail in the right rail.
         let railBtn = wrapper.querySelector('.cam-rail-btn');
         if (!railBtn) {
             railBtn = document.createElement('button');
@@ -2833,8 +2747,6 @@ function setCamViewMode(camId, mode) {
         };
             wrapper.appendChild(fsBtn);
         }
-        // "Return to last share" — only when we have a previous main tile that
-        // is still mounted in the grid.
         const prevExists = previousMainTileId && document.getElementById(previousMainTileId);
         let prevBtn = wrapper.querySelector('.cam-prev-btn');
         if (prevExists && previousMainTileId !== camId) {
@@ -2866,8 +2778,6 @@ function setCamViewMode(camId, mode) {
     }
 }
 
-// ESC only exits browser fullscreen now — collapsing to grid is no longer a
-// goal in Meet-style layout (main stage is always occupied).
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
@@ -3478,10 +3388,6 @@ function dmHasActiveHuddle(channelID) {
     return users.some(u => u.Username !== selfName);
 }
 
-// userIsInAnyCall returns true if the user with the given id is currently
-// in voice presence in any channel (regular channel, group huddle, or DM
-// huddle). Used to surface a "headphones" badge in the DM list so you can
-// see at a glance who is on a call right now.
 function userIsInAnyCall(userID) {
     if (!userID) return false;
     const uid = Number(userID);
@@ -3504,8 +3410,6 @@ function updateActiveHuddleBadges() {
         const otherId = parseInt(row.dataset.otherId, 10);
         let badge = row.querySelector('.dm-active-huddle');
         const hasCallBadge = !!row.querySelector('.dm-call-badge');
-        // Show headphones if there's an active huddle in this DM OR the
-        // other user is currently in a call somewhere else (channel/group).
         const showBadge = !hasCallBadge && (dmHasActiveHuddle(id) || userIsInAnyCall(otherId));
         if (showBadge) {
             if (!badge) {
