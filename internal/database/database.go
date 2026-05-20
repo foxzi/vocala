@@ -16,6 +16,7 @@ type ChatMessage struct {
 	Username  string `json:"username"`
 	Text      string `json:"text"`
 	CreatedAt int64  `json:"timestamp"`
+	Kind      string `json:"kind,omitempty"`
 }
 
 var DB *sql.DB
@@ -65,6 +66,15 @@ func migrate() {
 			created_at INTEGER NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_messages_channel ON chat_messages(channel_id, created_at)`,
+		`CREATE TABLE IF NOT EXISTS chat_reactions (
+			message_id TEXT NOT NULL,
+			user_id INTEGER NOT NULL,
+			username TEXT NOT NULL,
+			emoji TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (message_id, user_id, emoji)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_chat_reactions_message ON chat_reactions(message_id)`,
 		`CREATE TABLE IF NOT EXISTS channel_members (
 			channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
 			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -110,6 +120,20 @@ func migrate() {
 		`ALTER TABLE users ADD COLUMN oauth_provider TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN oauth_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE users ADD COLUMN email TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE channels ADD COLUMN is_ephemeral INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN ephemeral_empty_since INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN is_dm INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN dm_user_a INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN dm_user_b INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE channels ADD COLUMN last_huddle_at INTEGER NOT NULL DEFAULT 0`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_dm_pair ON channels(dm_user_a, dm_user_b) WHERE is_dm = 1`,
+		`ALTER TABLE chat_messages ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE IF NOT EXISTS channel_last_read (
+			user_id INTEGER NOT NULL,
+			channel_id INTEGER NOT NULL,
+			last_read_at INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (user_id, channel_id)
+		)`,
 	}
 	for _, q := range migrations {
 		DB.Exec(q) // ignore errors if columns already exist
@@ -119,8 +143,8 @@ func migrate() {
 // SaveChatMessage stores a chat message in the database.
 func SaveChatMessage(msg ChatMessage) error {
 	_, err := DB.Exec(
-		`INSERT INTO chat_messages (id, channel_id, user_id, username, text, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		msg.ID, msg.ChannelID, msg.UserID, msg.Username, msg.Text, msg.CreatedAt,
+		`INSERT INTO chat_messages (id, channel_id, user_id, username, text, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		msg.ID, msg.ChannelID, msg.UserID, msg.Username, msg.Text, msg.CreatedAt, msg.Kind,
 	)
 	return err
 }
@@ -128,7 +152,7 @@ func SaveChatMessage(msg ChatMessage) error {
 // GetChatHistory returns the last N messages for a channel, oldest first.
 func GetChatHistory(channelID int64, limit int) ([]ChatMessage, error) {
 	rows, err := DB.Query(
-		`SELECT id, channel_id, user_id, username, text, created_at FROM chat_messages
+		`SELECT id, channel_id, user_id, username, text, created_at, IFNULL(kind,'') FROM chat_messages
 		 WHERE channel_id = ? ORDER BY created_at DESC LIMIT ?`,
 		channelID, limit,
 	)
@@ -140,7 +164,7 @@ func GetChatHistory(channelID int64, limit int) ([]ChatMessage, error) {
 	var msgs []ChatMessage
 	for rows.Next() {
 		var m ChatMessage
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Text, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ChannelID, &m.UserID, &m.Username, &m.Text, &m.CreatedAt, &m.Kind); err != nil {
 			continue
 		}
 		msgs = append(msgs, m)
@@ -154,7 +178,81 @@ func GetChatHistory(channelID int64, limit int) ([]ChatMessage, error) {
 
 // ClearChannelMessages deletes all messages in a channel.
 func ClearChannelMessages(channelID int64) {
+	DB.Exec(`DELETE FROM chat_reactions WHERE message_id IN (SELECT id FROM chat_messages WHERE channel_id = ?)`, channelID)
 	DB.Exec(`DELETE FROM chat_messages WHERE channel_id = ?`, channelID)
+}
+
+// GetMessageChannel returns the channel ID a message belongs to (or 0).
+func GetMessageChannel(messageID string) (int64, error) {
+	var chID int64
+	err := DB.QueryRow(`SELECT channel_id FROM chat_messages WHERE id = ?`, messageID).Scan(&chID)
+	if err != nil {
+		return 0, err
+	}
+	return chID, nil
+}
+
+// ChatReaction represents a stored reaction.
+type ChatReaction struct {
+	MessageID string `json:"message_id"`
+	UserID    int64  `json:"user_id"`
+	Username  string `json:"username"`
+	Emoji     string `json:"emoji"`
+}
+
+// AddChatReaction inserts a reaction. Returns true if newly inserted, false if it already existed.
+func AddChatReaction(r ChatReaction, createdAt int64) (bool, error) {
+	res, err := DB.Exec(
+		`INSERT OR IGNORE INTO chat_reactions (message_id, user_id, username, emoji, created_at) VALUES (?, ?, ?, ?, ?)`,
+		r.MessageID, r.UserID, r.Username, r.Emoji, createdAt,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// RemoveChatReaction removes a single user's reaction.
+func RemoveChatReaction(messageID string, userID int64, emoji string) error {
+	_, err := DB.Exec(
+		`DELETE FROM chat_reactions WHERE message_id = ? AND user_id = ? AND emoji = ?`,
+		messageID, userID, emoji,
+	)
+	return err
+}
+
+// GetReactionsForMessages returns all reactions for the given message IDs.
+func GetReactionsForMessages(messageIDs []string) ([]ChatReaction, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := ""
+	args := make([]any, 0, len(messageIDs))
+	for i, id := range messageIDs {
+		if i > 0 {
+			placeholders += ","
+		}
+		placeholders += "?"
+		args = append(args, id)
+	}
+	rows, err := DB.Query(
+		`SELECT message_id, user_id, username, emoji FROM chat_reactions WHERE message_id IN (`+placeholders+`) ORDER BY created_at ASC`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ChatReaction
+	for rows.Next() {
+		var r ChatReaction
+		if err := rows.Scan(&r.MessageID, &r.UserID, &r.Username, &r.Emoji); err != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // CleanupOldMessages removes messages older than the given retention period.

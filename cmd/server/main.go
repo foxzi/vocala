@@ -116,6 +116,26 @@ func (l *ipLimiter) cleanup() {
 
 var limiter = newIPLimiter()
 
+// Per-user rate limiter for expensive actions (Quick room creation).
+type userLimiterStore struct {
+	mu       sync.Mutex
+	limiters map[int64]*rate.Limiter
+}
+
+func (s *userLimiterStore) get(userID int64) *rate.Limiter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.limiters[userID]; ok {
+		return l
+	}
+	// 10 quick-rooms/hour, burst of 3.
+	l := rate.NewLimiter(rate.Every(6*time.Minute), 3)
+	s.limiters[userID] = l
+	return l
+}
+
+var quickRoomLimiter = &userLimiterStore{limiters: map[int64]*rate.Limiter{}}
+
 func clientIP(r *http.Request) string {
 	// Only trust X-Forwarded-For when behind reverse proxy (RemoteAddr is loopback)
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
@@ -494,6 +514,21 @@ func main() {
 		}()
 	}
 
+	if err := channel.PurgeStaleDMMembers(); err != nil {
+		logger.Error("purge stale DM members: %v", err)
+	}
+
+	go func() {
+		for {
+			if n, err := channel.CleanupEphemeralOlderThan(time.Hour); err != nil {
+				logger.Error("ephemeral cleanup error: %v", err)
+			} else if n > 0 {
+				logger.Info("ephemeral cleanup: removed %d channels", n)
+			}
+			time.Sleep(10 * time.Minute)
+		}
+	}()
+
 	templates = loadTemplates()
 
 	mux := http.NewServeMux()
@@ -510,6 +545,7 @@ func main() {
 	// App routes
 	mux.HandleFunc("/", requireAuth(handleApp))
 	mux.HandleFunc("/channels", requireAuth(csrfProtect(handleChannels)))
+	mux.HandleFunc("/channels/quick", requireAuth(csrfProtect(handleQuickRoom)))
 	mux.HandleFunc("/channels/delete", requireAuth(csrfProtect(handleDeleteChannel)))
 	mux.HandleFunc("/channels/privacy", requireAuth(csrfProtect(handleChannelPrivacy)))
 	mux.HandleFunc("/channels/members", requireAuth(csrfProtect(handleChannelMembers)))
@@ -518,6 +554,9 @@ func main() {
 	mux.HandleFunc("/channels/invite", requireAuth(csrfProtect(handleChannelInvite)))
 	mux.HandleFunc("/invite/", handleInviteAccept)
 	mux.HandleFunc("/api/users", requireAuth(handleAPIUsers))
+	mux.HandleFunc("/api/dms", requireAuth(handleListDMs))
+	mux.HandleFunc("/api/dms/open", requireAuth(csrfProtect(handleOpenDM)))
+	mux.HandleFunc("/api/groups", requireAuth(handleListGroups))
 	mux.HandleFunc("/account/password", requireAuth(csrfProtect(handleChangePassword)))
 
 	// Guest routes
@@ -644,17 +683,20 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, auth.ErrNotActive) {
 		csrfToken := setCSRFCookie(w, r)
 		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{
-			"Error":     "Your account is pending activation by an administrator",
-			"CSRFToken": csrfToken,
+			"Error":               "Your account is pending activation by an administrator",
+			"CSRFToken":           csrfToken,
+			"RegistrationEnabled": cfg.Auth.RegistrationEnabled,
+			"OAuthProviders":      cfg.OAuth.Providers,
 		})
 		return
 	}
 	if err != nil {
 		csrfToken := setCSRFCookie(w, r)
 		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{
-			"Error":          "Invalid username or password",
-			"CSRFToken":      csrfToken,
-			"OAuthProviders": cfg.OAuth.Providers,
+			"Error":               "Invalid username or password",
+			"CSRFToken":           csrfToken,
+			"RegistrationEnabled": cfg.Auth.RegistrationEnabled,
+			"OAuthProviders":      cfg.OAuth.Providers,
 		})
 		return
 	}
@@ -664,8 +706,10 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		logger.Error("failed to create session for user %d: %v", user.ID, err)
 		csrfToken := setCSRFCookie(w, r)
 		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]any{
-			"Error":     "Something went wrong",
-			"CSRFToken": csrfToken,
+			"Error":               "Something went wrong",
+			"CSRFToken":           csrfToken,
+			"RegistrationEnabled": cfg.Auth.RegistrationEnabled,
+			"OAuthProviders":      cfg.OAuth.Providers,
 		})
 		return
 	}
@@ -840,6 +884,38 @@ func handleChannels(w http.ResponseWriter, r *http.Request) {
 	templates["app.html"].ExecuteTemplate(w, "channel-list", data)
 }
 
+func handleQuickRoom(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user := userFromContext(r)
+	if !quickRoomLimiter.get(user.ID).Allow() {
+		http.Error(w, "too many quick rooms, please wait a few minutes", http.StatusTooManyRequests)
+		return
+	}
+	ch, err := channel.CreateEphemeral("Quick", user.ID, 0)
+	if err != nil {
+		logger.Error("quick room create failed: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	token, err := channel.CreateGuestInvite(ch.ID, user.ID, 24)
+	if err != nil {
+		logger.Error("quick room guest-invite failed: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"id":          ch.ID,
+		"name":        ch.Name,
+		"url":         "/channels/" + ch.Name,
+		"guest_url":   fmt.Sprintf("/guest/%s", token),
+		"guest_token": token,
+	})
+}
+
 func handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -946,9 +1022,20 @@ func handleAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var pending, active []auth.User
+	for _, u := range users {
+		if u.IsActive {
+			active = append(active, u)
+		} else {
+			pending = append(pending, u)
+		}
+	}
+
 	csrfToken := setCSRFCookie(w, r)
 	data := map[string]any{
 		"Users":               users,
+		"PendingUsers":        pending,
+		"ActiveUsers":         active,
 		"CSRFToken":           csrfToken,
 		"Flash":               r.URL.Query().Get("flash"),
 		"RegistrationEnabled": cfg.Auth.RegistrationEnabled,
@@ -1237,6 +1324,69 @@ func handleAPIUsers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
+func handleListDMs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user := userFromContext(r)
+	dms, err := channel.ListDMsForUser(user.ID)
+	if err != nil {
+		logger.Error("list DMs: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if dms == nil {
+		dms = []channel.DMSummary{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(dms)
+}
+
+func handleListGroups(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user := userFromContext(r)
+	groups, err := channel.ListGroupsForUser(user.ID)
+	if err != nil {
+		logger.Error("list groups: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	if groups == nil {
+		groups = []channel.Channel{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(groups)
+}
+
+func handleOpenDM(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	user := userFromContext(r)
+	otherIDStr := r.FormValue("user_id")
+	otherID, err := strconv.ParseInt(otherIDStr, 10, 64)
+	if err != nil || otherID == 0 || otherID == user.ID {
+		http.Error(w, "invalid user_id", http.StatusBadRequest)
+		return
+	}
+	ch, err := channel.OpenDM(user.ID, otherID)
+	if err != nil {
+		logger.Error("open DM: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"channel_id": ch.ID,
+		"name":       ch.Name,
+	})
+}
+
 // --- Invite links ---
 
 func handleChannelInvite(w http.ResponseWriter, r *http.Request) {
@@ -1252,6 +1402,10 @@ func handleChannelInvite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := userFromContext(r)
+	if _, err := channel.GetByID(chID); err != nil {
+		http.Error(w, "channel not found", http.StatusNotFound)
+		return
+	}
 	if !channel.CanManage(chID, user.ID, user.IsAdmin) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return

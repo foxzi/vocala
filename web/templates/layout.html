@@ -46,6 +46,91 @@
             from { opacity: 0; transform: translateY(-4px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        @keyframes voiceReactionPop {
+            0%   { opacity: 0; transform: scale(0.4); }
+            18%  { opacity: 1; transform: scale(1.25); }
+            30%  { transform: scale(1); }
+            85%  { opacity: 1; transform: scale(1); }
+            100% { opacity: 0; transform: scale(0.9); }
+        }
+        @keyframes reactionPillIn {
+            from { opacity: 0; transform: translateX(20px) scale(0.9); }
+            to   { opacity: 1; transform: translateX(0) scale(1); }
+        }
+        @keyframes reactionPillOut {
+            from { opacity: 1; transform: translateX(0) scale(1); }
+            to   { opacity: 0; transform: translateX(20px) scale(0.9); }
+        }
+        @keyframes reactionPillPulse {
+            0%   { transform: scale(1); }
+            40%  { transform: scale(1.12); }
+            100% { transform: scale(1); }
+        }
+        #chat-panel.chat-hidden { display: none !important; }
+        body.expanded-tile-mode #voice-area {
+            padding: 0 !important;
+            overflow: hidden !important;
+            flex-direction: row !important;
+        }
+        body.expanded-tile-mode #channel-view-users {
+            display: none !important;
+        }
+        body.expanded-tile-mode #camera-grid {
+            flex: 1 1 0 !important;
+            min-width: 0 !important;
+            max-width: none !important;
+            margin: 0 !important;
+            width: auto !important;
+            height: 100% !important;
+            display: flex !important;
+            grid-template-columns: none !important;
+            gap: 0 !important;
+            margin-bottom: 0 !important;
+        }
+        body.expanded-tile-mode #camera-grid > *:not(.expanded-tile) {
+            display: none !important;
+        }
+        body.expanded-tile-mode #camera-grid > .expanded-tile {
+            flex: 1 1 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            max-width: none !important;
+            aspect-ratio: auto !important;
+            border-radius: 0 !important;
+            margin: 0 !important;
+        }
+        body.expanded-tile-mode #expanded-users-rail {
+            flex: 0 0 240px;
+            min-width: 240px;
+            height: 100%;
+            background: var(--vc-sidebar);
+            border-left: 1px solid var(--vc-border);
+            padding: 8px;
+            overflow-y: auto;
+            display: flex !important;
+            flex-direction: column;
+            gap: 8px;
+        }
+        body.expanded-tile-mode #expanded-users-rail > * {
+            flex: 0 0 auto;
+            width: 100%;
+        }
+        body.expanded-tile-mode #camera-grid {
+            position: relative;
+            width: auto;
+            height: 100%;
+            overflow: visible;
+            opacity: 1;
+            pointer-events: auto;
+            left: auto;
+        }
+        #expanded-users-rail { display: none; }
+        body.expanded-tile-mode #expanded-users-rail {
+            display: flex;
+        }
+        body.expanded-tile-mode #expanded-users-rail.rail-hidden,
+        #expanded-users-rail.rail-hidden { display: none !important; visibility: hidden !important; width: 0 !important; flex: 0 0 0 !important; min-width: 0 !important; padding: 0 !important; border: 0 !important; }
+        .expanded-tile > .absolute.top-1.right-1 { display: none !important; }
 
         /* ── Theme definitions ── */
         :root, [data-theme="default"] {

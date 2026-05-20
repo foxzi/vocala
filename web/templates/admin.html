@@ -69,43 +69,84 @@
             </div>
         </div>
 
-        <!-- Users Table -->
-        <div class="bg-vc-sidebar rounded-xl border border-vc-border overflow-hidden">
-            <div class="px-6 py-4 border-b border-vc-border">
-                <h2 class="text-lg font-semibold">Users ({{len .Users}})</h2>
+        {{if .PendingUsers}}
+        <!-- Pending users (waiting for admin approval) -->
+        <div class="bg-vc-sidebar rounded-xl border border-vc-yellow/40 overflow-hidden mb-6">
+            <div class="px-6 py-4 border-b border-vc-border flex items-center gap-2">
+                <svg class="w-5 h-5 text-vc-yellow" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                <h2 class="text-lg font-semibold">Pending approval ({{len .PendingUsers}})</h2>
+                <span class="text-xs text-vc-muted ml-auto">Activate to grant access</span>
             </div>
             <div class="overflow-x-auto">
                 <table class="w-full">
                     <thead>
                         <tr class="text-left text-xs text-vc-muted uppercase tracking-wider border-b border-vc-border">
                             <th class="px-6 py-3">User</th>
-                            <th class="px-6 py-3">Status</th>
+                            <th class="px-6 py-3">Registered</th>
+                            <th class="px-6 py-3 text-right">Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {{range .PendingUsers}}
+                        <tr class="border-b border-vc-border/50 hover:bg-vc-hover/30 transition">
+                            <td class="px-6 py-4">
+                                <div class="flex items-center gap-3">
+                                    <img class="admin-avatar w-8 h-8 rounded-full opacity-60" data-username="{{.Username}}" src="" alt="">
+                                    <span class="font-medium">{{.Username}}</span>
+                                </div>
+                            </td>
+                            <td class="px-6 py-4 text-sm text-vc-muted">
+                                {{.CreatedAt.Format "2006-01-02 15:04"}}
+                            </td>
+                            <td class="px-6 py-4">
+                                <div class="flex items-center justify-end gap-2">
+                                    <form method="POST" action="/admin/users/activate" class="inline">
+                                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                                        <input type="hidden" name="user_id" value="{{.ID}}">
+                                        <button type="submit" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-vc-green/20 text-vc-green hover:bg-vc-green/30 transition" title="Activate">
+                                            Activate
+                                        </button>
+                                    </form>
+                                    <form method="POST" action="/admin/users/delete" class="inline" data-confirm-delete="{{.Username}}">
+                                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
+                                        <input type="hidden" name="user_id" value="{{.ID}}">
+                                        <button type="submit" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-vc-red/20 text-vc-red hover:bg-vc-red/30 transition" title="Reject (delete user)">
+                                            Reject
+                                        </button>
+                                    </form>
+                                </div>
+                            </td>
+                        </tr>
+                        {{end}}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        {{end}}
+
+        <!-- Active users -->
+        <div class="bg-vc-sidebar rounded-xl border border-vc-border overflow-hidden">
+            <div class="px-6 py-4 border-b border-vc-border">
+                <h2 class="text-lg font-semibold">Users ({{len .ActiveUsers}})</h2>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead>
+                        <tr class="text-left text-xs text-vc-muted uppercase tracking-wider border-b border-vc-border">
+                            <th class="px-6 py-3">User</th>
                             <th class="px-6 py-3">Role</th>
                             <th class="px-6 py-3">Created</th>
                             <th class="px-6 py-3 text-right">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {{range .Users}}
+                        {{range .ActiveUsers}}
                         <tr class="border-b border-vc-border/50 hover:bg-vc-hover/30 transition">
                             <td class="px-6 py-4">
                                 <div class="flex items-center gap-3">
-                                    <img class="admin-avatar w-8 h-8 rounded-full {{if not .IsActive}}opacity-40{{end}}" data-username="{{.Username}}" src="" alt="">
+                                    <img class="admin-avatar w-8 h-8 rounded-full" data-username="{{.Username}}" src="" alt="">
                                     <span class="font-medium">{{.Username}}</span>
                                 </div>
-                            </td>
-                            <td class="px-6 py-4">
-                                {{if .IsActive}}
-                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-vc-green/20 text-vc-green">
-                                    <span class="w-1.5 h-1.5 rounded-full bg-vc-green"></span>
-                                    Active
-                                </span>
-                                {{else}}
-                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-vc-yellow/20 text-vc-yellow">
-                                    <span class="w-1.5 h-1.5 rounded-full bg-vc-yellow"></span>
-                                    Pending
-                                </span>
-                                {{end}}
                             </td>
                             <td class="px-6 py-4">
                                 {{if .IsAdmin}}
@@ -119,7 +160,6 @@
                             </td>
                             <td class="px-6 py-4">
                                 <div class="flex items-center justify-end gap-2">
-                                    {{if .IsActive}}
                                     <form method="POST" action="/admin/users/deactivate" class="inline">
                                         <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
                                         <input type="hidden" name="user_id" value="{{.ID}}">
@@ -127,15 +167,6 @@
                                             Deactivate
                                         </button>
                                     </form>
-                                    {{else}}
-                                    <form method="POST" action="/admin/users/activate" class="inline">
-                                        <input type="hidden" name="csrf_token" value="{{$.CSRFToken}}">
-                                        <input type="hidden" name="user_id" value="{{.ID}}">
-                                        <button type="submit" class="px-3 py-1.5 text-xs font-medium rounded-lg bg-vc-green/20 text-vc-green hover:bg-vc-green/30 transition" title="Activate">
-                                            Activate
-                                        </button>
-                                    </form>
-                                    {{end}}
 
                                     {{if .IsAdmin}}
                                     <form method="POST" action="/admin/users/revoke-admin" class="inline">

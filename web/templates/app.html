@@ -36,28 +36,50 @@
         <div class="p-3 border-b border-vc-border">
             <form hx-post="/channels" hx-target="#channel-list" hx-swap="innerHTML" hx-on::after-request="this.reset()">
                 <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-                <div class="flex gap-2">
+                <div class="flex gap-1.5 min-w-0">
                     <input type="text" name="name" required placeholder="New channel..."
-                        class="flex-1 px-3 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition">
-                    <label class="flex items-center gap-1 px-2 py-1.5 cursor-pointer rounded-lg border border-vc-border hover:border-vc-yellow/50 has-[:checked]:border-vc-yellow has-[:checked]:bg-vc-yellow/10 transition" title="Private channel">
+                        class="flex-1 min-w-0 px-2.5 py-1.5 bg-vc-bg border border-vc-border rounded-lg text-sm text-vc-text placeholder-vc-muted focus:outline-none focus:border-vc-accent transition">
+                    <label class="flex-shrink-0 flex items-center justify-center px-2 py-1.5 cursor-pointer rounded-lg border border-vc-border hover:border-vc-yellow/50 has-[:checked]:border-vc-yellow has-[:checked]:bg-vc-yellow/10 transition" title="Private channel">
                         <input type="checkbox" name="is_private" class="hidden peer">
                         <svg class="w-4 h-4 text-vc-muted peer-checked:text-vc-yellow transition" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
                         </svg>
                     </label>
                     <button type="submit"
-                        class="px-3 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-sm font-medium rounded-lg transition">
+                        class="flex-shrink-0 px-2.5 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-sm font-medium rounded-lg transition">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
                         </svg>
                     </button>
                 </div>
             </form>
+            <button type="button" onclick="startQuickRoom()"
+                class="w-full mt-2 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-vc-channel hover:bg-vc-hover text-vc-text text-xs font-medium transition border border-vc-border" title="Create a one-click private room and copy the invite link">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                </svg>
+                Quick room
+            </button>
         </div>
 
         <!-- Channel List -->
-        <div class="flex-1 overflow-y-auto p-2" id="channel-list">
-            {{template "channel-list" .}}
+        <div class="flex-1 overflow-y-auto" id="sidebar-scroll">
+            <div class="p-2" id="channel-list">
+                {{template "channel-list" .}}
+            </div>
+            <div class="px-3 pt-2 pb-1 flex items-center justify-between border-t border-vc-border mt-1">
+                <span class="text-[11px] font-semibold uppercase tracking-wide text-vc-muted">Direct messages</span>
+                <button onclick="openNewDMPicker()" title="New direct message" class="text-vc-muted hover:text-vc-accent transition">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                </button>
+            </div>
+            <div class="p-2" id="dm-list">
+                <div class="text-center text-vc-muted text-xs py-2">No conversations yet</div>
+            </div>
+            <div id="group-section" class="px-3 pt-2 pb-1 border-t border-vc-border mt-1 hidden">
+                <span class="text-[11px] font-semibold uppercase tracking-wide text-vc-muted">Group conversations</span>
+            </div>
+            <div class="p-2 overflow-y-auto" id="group-list" style="max-height: calc(3 * 2.5rem + 1rem);"></div>
         </div>
 
         <!-- User Panel -->
