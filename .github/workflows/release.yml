@@ -2,11 +2,14 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
     branches: [main]
     paths:
       - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v0.7.2). Leave empty to read VERSION from Makefile.'
+        required: false
 
 permissions:
   contents: write
@@ -22,10 +25,11 @@ jobs:
       - name: Resolve version and tag
         id: ver
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            TAG="${GITHUB_REF_NAME}"
+          INPUT_TAG="${{ github.event.inputs.tag }}"
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
             VERSION="${TAG#v}"
-            echo "mode=tag" >> "$GITHUB_OUTPUT"
+            echo "mode=manual" >> "$GITHUB_OUTPUT"
           else
             VERSION=$(grep -E '^VERSION \?=' Makefile | sed -E 's/^VERSION \?= *//')
             TAG="v${VERSION}"
@@ -63,7 +67,7 @@ jobs:
 
       - name: Sync nfpm version
         if: steps.ver.outputs.skip != 'true'
-        run: sed -i "s/^version:.*/version: v${{ steps.ver.outputs.version }}/" nfpm.yaml
+        run: 'sed -i "s/^version:.*/version: v${{ steps.ver.outputs.version }}/" nfpm.yaml'
 
       - name: Build deb and rpm
         if: steps.ver.outputs.skip != 'true'
@@ -73,7 +77,7 @@ jobs:
           nfpm package --packager rpm --target dist/
 
       - name: Create tag if bump
-        if: steps.ver.outputs.skip != 'true' && steps.ver.outputs.mode == 'bump'
+        if: steps.ver.outputs.skip != 'true' && steps.ver.outputs.mode != 'manual'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
