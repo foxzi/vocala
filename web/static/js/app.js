@@ -1461,6 +1461,7 @@ async function startWebRTC() {
             console.log('Mobile detected, forcing TURNS relay');
         }
         peerConnection = new RTCPeerConnection(rtcConfig);
+        diagLogIceServers(iceServers);
 
         // Add processed audio track (goes through GainNode)
         processedStream.getTracks().forEach(track => {
@@ -1546,6 +1547,11 @@ async function startWebRTC() {
 
         peerConnection.oniceconnectionstatechange = () => {
             updateRTCStatus();
+            const st = peerConnection.iceConnectionState;
+            if (st === 'failed' || st === 'disconnected') {
+                console.warn('[vocala-diag] ICE state=' + st + ' — running diagnostic. Tip: run vocalaDiag() in console for details.');
+                diagPeerStats();
+            }
         };
 
         // Create and send offer
@@ -1571,6 +1577,7 @@ async function startWebRTC() {
             ];
             const rtcConfig = { iceServers };
             peerConnection = new RTCPeerConnection(rtcConfig);
+            diagLogIceServers(iceServers);
 
             // Add receive-only audio transceiver
             peerConnection.addTransceiver('audio', { direction: 'recvonly' });
@@ -2879,6 +2886,181 @@ function cleanupWebRTC() {
     gainNode = null;
     isSpeaking = false;
 }
+
+// ─── WebRTC Diagnostics ───────────────────────────────────────
+
+function diagLogIceServers(iceServers) {
+    console.groupCollapsed('[vocala-diag] ICE servers (' + (iceServers?.length || 0) + ')');
+    (iceServers || []).forEach((s, i) => {
+        const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+        urls.forEach(u => {
+            const hasAuth = !!(s.username && s.credential);
+            console.log('  [' + i + '] ' + u + (hasAuth ? ' (auth)' : ''));
+        });
+    });
+    console.groupEnd();
+}
+
+// Probe each STUN/TURN URL via a temporary RTCPeerConnection and report
+// which ones returned candidates (server-reflexive for STUN, relay for TURN).
+async function diagProbeIceServers(iceServers, timeoutMs) {
+    timeoutMs = timeoutMs || 5000;
+    const results = [];
+    for (const s of iceServers || []) {
+        const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+        for (const url of urls) {
+            const single = { urls: url };
+            if (s.username) single.username = s.username;
+            if (s.credential) single.credential = s.credential;
+            const r = await diagProbeOne(single, timeoutMs);
+            results.push(Object.assign({ url: url }, r));
+        }
+    }
+    console.groupCollapsed('[vocala-diag] STUN/TURN probe results');
+    results.forEach(r => {
+        const tag = r.ok ? '%c OK ' : '%c FAIL';
+        const css = r.ok ? 'background:#0a0;color:#fff;padding:1px 4px' : 'background:#a00;color:#fff;padding:1px 4px';
+        console.log(tag + ' %s — srflx=%s relay=%s host=%s err=%s', css, r.url,
+            r.srflx || '-', r.relay || '-', r.host || '-', r.err || '-');
+    });
+    console.groupEnd();
+    return results;
+}
+
+function diagProbeOne(server, timeoutMs) {
+    return new Promise(resolve => {
+        let pc;
+        const out = { ok: false, srflx: null, relay: null, host: null, err: null };
+        try {
+            pc = new RTCPeerConnection({ iceServers: [server], iceTransportPolicy: 'all' });
+        } catch (e) {
+            resolve({ ok: false, err: 'ctor: ' + e.message }); return;
+        }
+        const done = () => {
+            try { pc.close(); } catch (_) {}
+            resolve(out);
+        };
+        const timer = setTimeout(() => {
+            if (!out.srflx && !out.relay && !out.host) out.err = 'timeout';
+            done();
+        }, timeoutMs);
+        pc.onicecandidate = (ev) => {
+            if (!ev.candidate) {
+                clearTimeout(timer);
+                out.ok = !!(out.srflx || out.relay);
+                // For STUN we expect srflx; for TURN we expect relay.
+                const isTurn = (server.urls || '').toString().startsWith('turn');
+                if (isTurn && !out.relay) {
+                    out.ok = false;
+                    out.err = out.err || 'no relay candidate (auth or reachability)';
+                } else if (!isTurn && !out.srflx) {
+                    out.ok = false;
+                    out.err = out.err || 'no srflx candidate (STUN blocked)';
+                }
+                done();
+                return;
+            }
+            const c = ev.candidate.candidate || '';
+            const m = c.match(/ typ (\S+)/);
+            const typ = m ? m[1] : '';
+            const addrMatch = c.match(/candidate:\S+ \d+ \S+ \d+ (\S+) (\d+)/);
+            const addr = addrMatch ? (addrMatch[1] + ':' + addrMatch[2]) : '';
+            if (typ === 'srflx') out.srflx = addr || 'yes';
+            else if (typ === 'relay') out.relay = addr || 'yes';
+            else if (typ === 'host') out.host = addr || 'yes';
+        };
+        pc.onicegatheringstatechange = () => {
+            if (pc.iceGatheringState === 'complete') {
+                clearTimeout(timer);
+                out.ok = !!(out.srflx || out.relay);
+                const isTurn = (server.urls || '').toString().startsWith('turn');
+                if (isTurn && !out.relay) {
+                    out.ok = false;
+                    out.err = out.err || 'no relay candidate';
+                } else if (!isTurn && !out.srflx) {
+                    out.ok = false;
+                    out.err = out.err || 'no srflx candidate';
+                }
+                done();
+            }
+        };
+        // Need a data channel to trigger gathering without media.
+        try { pc.createDataChannel('diag'); } catch (_) {}
+        pc.createOffer().then(o => pc.setLocalDescription(o)).catch(e => {
+            clearTimeout(timer);
+            out.err = 'offer: ' + e.message;
+            done();
+        });
+    });
+}
+
+// Snapshot current peerConnection: selected candidate pair, inbound video stats.
+async function diagPeerStats() {
+    if (!peerConnection) {
+        console.warn('[vocala-diag] no active peerConnection');
+        return null;
+    }
+    const stats = await peerConnection.getStats();
+    const report = { selectedPair: null, inboundVideo: [], outboundVideo: [], local: null, remote: null };
+    const byId = {};
+    stats.forEach(r => { byId[r.id] = r; });
+    stats.forEach(r => {
+        if (r.type === 'candidate-pair' && r.state === 'succeeded' && r.nominated) {
+            const local = byId[r.localCandidateId] || {};
+            const remote = byId[r.remoteCandidateId] || {};
+            report.selectedPair = {
+                localType: local.candidateType,
+                localProto: local.protocol,
+                localAddr: (local.address || local.ip) + ':' + local.port,
+                remoteType: remote.candidateType,
+                remoteAddr: (remote.address || remote.ip) + ':' + remote.port,
+                bytesSent: r.bytesSent, bytesReceived: r.bytesReceived,
+                rtt: r.currentRoundTripTime,
+            };
+        }
+        if (r.type === 'inbound-rtp' && r.kind === 'video') {
+            report.inboundVideo.push({
+                ssrc: r.ssrc, trackId: r.trackIdentifier,
+                framesDecoded: r.framesDecoded, framesReceived: r.framesReceived,
+                bytesReceived: r.bytesReceived, packetsLost: r.packetsLost,
+                frameWidth: r.frameWidth, frameHeight: r.frameHeight,
+            });
+        }
+        if (r.type === 'outbound-rtp' && r.kind === 'video') {
+            report.outboundVideo.push({
+                ssrc: r.ssrc, framesSent: r.framesSent, framesEncoded: r.framesEncoded,
+                bytesSent: r.bytesSent, frameWidth: r.frameWidth, frameHeight: r.frameHeight,
+            });
+        }
+    });
+    console.groupCollapsed('[vocala-diag] Peer connection stats');
+    console.log('connectionState:', peerConnection.connectionState);
+    console.log('iceConnectionState:', peerConnection.iceConnectionState);
+    console.log('iceGatheringState:', peerConnection.iceGatheringState);
+    console.log('selected pair:', report.selectedPair);
+    console.log('inbound video:', report.inboundVideo);
+    console.log('outbound video:', report.outboundVideo);
+    console.groupEnd();
+    // Warn if inbound video has frames received but none decoded — typical "black screen".
+    report.inboundVideo.forEach(v => {
+        if (v.framesReceived > 0 && (!v.framesDecoded || v.framesDecoded === 0)) {
+            console.warn('[vocala-diag] black screen suspected: ssrc=' + v.ssrc +
+                ' received=' + v.framesReceived + ' decoded=' + v.framesDecoded);
+        }
+    });
+    return report;
+}
+
+// Public entry point — users run `vocalaDiag()` from devtools.
+window.vocalaDiag = async function () {
+    const iceServers = window.VOCALA_ICE_SERVERS || [
+        { urls: 'stun:stun.l.google.com:19302' },
+    ];
+    diagLogIceServers(iceServers);
+    const probe = await diagProbeIceServers(iceServers, 5000);
+    const stats = await diagPeerStats();
+    return { iceServers, probe, stats };
+};
 
 function updateRTCStatus() {
     if (!peerConnection) return;
