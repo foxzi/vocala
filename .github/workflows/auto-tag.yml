@@ -1,0 +1,60 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Makefile'
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Read current version
+        id: current
+        run: |
+          VERSION=$(grep -E '^VERSION \?=' Makefile | sed -E 's/^VERSION \?= *//')
+          if [ -z "$VERSION" ]; then
+            echo "no VERSION in Makefile"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "current VERSION=$VERSION"
+
+      - name: Check if VERSION changed
+        id: changed
+        run: |
+          if git diff HEAD^ HEAD -- Makefile | grep -qE '^[-+]VERSION \?='; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "VERSION line not modified in this commit"
+          fi
+
+      - name: Check tag does not exist
+        if: steps.changed.outputs.changed == 'true'
+        id: tagcheck
+        run: |
+          TAG="v${{ steps.current.outputs.version }}"
+          if git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
+            echo "tag ${TAG} already exists, skipping"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.changed.outputs.changed == 'true' && steps.tagcheck.outputs.exists == 'false'
+        run: |
+          TAG="v${{ steps.current.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
