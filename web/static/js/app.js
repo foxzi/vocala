@@ -1911,12 +1911,7 @@ function addScreenTileToGrid({ id, stream, label, track }) {
         track.onended = () => removeScreenTileFromGrid(id);
     }
 
-    if (!expandedCamId) {
-        setCamViewMode(id, 'expanded');
-    } else if (expandedCamId !== id) {
-        previousMainTileId = expandedCamId;
-        setCamViewMode(id, 'expanded');
-    }
+    // No auto-expand: tile joins the mosaic. User clicks to enter stage view.
 }
 
 function removeScreenTileFromGrid(id) {
@@ -2567,10 +2562,6 @@ function addLocalCameraToGrid() {
     // Local camera always first
     grid.prepend(wrapper);
     updateGridColumns();
-
-    if (!expandedCamId) {
-        setCamViewMode('local-camera', 'expanded');
-    }
 }
 
 function handleRemoteCameraTrack(stream, track, mid) {
@@ -2635,10 +2626,6 @@ function handleRemoteCameraTrack(stream, track, mid) {
     wrapper.appendChild(controls);
     grid.appendChild(wrapper);
     updateGridColumns();
-
-    if (!expandedCamId) {
-        setCamViewMode(camId, 'expanded');
-    }
 
     track.onended = () => removeFromCameraGrid(camId);
 
