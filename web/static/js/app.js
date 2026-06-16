@@ -1983,38 +1983,66 @@ function observeCameraGrid() {
     _cameraGridObserver.observe(grid, { childList: true, subtree: true });
 }
 
+// Returns Map<userKey, [{tileId, kind}]> for all tiles with an active srcObject.
+// userKey is String(u.ID) for remote users, `self:${username}` for self.
+function buildMediaTilesByUser(selfName) {
+    const map = new Map();
+    const grid = document.getElementById('camera-grid');
+    if (!grid) return map;
+    grid.querySelectorAll('[id]').forEach(el => {
+        if (!el.querySelector('video')?.srcObject) return;
+        const id = el.id;
+        let userKey = null, kind = null;
+        if (id.startsWith('remote-cam-camera-'))          { userKey = id.replace('remote-cam-camera-', '');          kind = 'camera'; }
+        else if (id.startsWith('remote-screen-share-screen-')) { userKey = id.replace('remote-screen-share-screen-', ''); kind = 'screen'; }
+        else if (id.startsWith('remote-cam-screen-'))     { userKey = id.replace('remote-cam-screen-', '');          kind = 'screen'; }
+        else if (id === 'local-camera' && selfName)       { userKey = `self:${selfName}`;                            kind = 'camera'; }
+        else if (id === 'local-screen-share' && selfName) { userKey = `self:${selfName}`;                            kind = 'screen'; }
+        if (!userKey) return;
+        if (!map.has(userKey)) map.set(userKey, []);
+        map.get(userKey).push({ tileId: id, kind });
+    });
+    return map;
+}
+
+// Attaches srcObject from a camera-grid tile onto a <video> element.
+function syncVideoFromTile(videoEl, tileId, mirror) {
+    const src = document.getElementById(tileId)?.querySelector('video');
+    if (src?.srcObject && videoEl.srcObject !== src.srcObject) {
+        videoEl.srcObject = src.srcObject;
+        videoEl.play().catch(() => {});
+    }
+    videoEl.style.transform = mirror ? 'scaleX(-1)' : '';
+}
+
 function attachUserPreviewsToCards() {
-    const cards = document.querySelectorAll('#channel-view-users [data-user-id]');
     const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
+    const grid = document.querySelector('#channel-view-users .user-grid');
+
+    // Remove synthetic screen cards from a previous run before rebuilding
+    document.querySelectorAll('#channel-view-users [data-synthetic-screen]').forEach(el => el.remove());
+
+    const tilesByUser = buildMediaTilesByUser(selfName);
+
+    const cards = document.querySelectorAll('#channel-view-users [data-user-id]');
     cards.forEach(card => {
         const uid = card.dataset.userId;
         const username = card.dataset.username;
         const isSelf = username === selfName;
+        const userKey = isSelf ? `self:${selfName}` : uid;
 
-        // Remove legacy small-thumbnail container from old layout if still present
         const legacyPreviews = card.querySelector('.user-card-previews');
         if (legacyPreviews) legacyPreviews.remove();
 
-        // Find primary video tile: screen share takes priority over camera
-        let primaryTile = null;
-        const tryFind = (id) => {
-            if (primaryTile) return;
-            const el = document.getElementById(id);
-            if (el && el.querySelector('video')?.srcObject) primaryTile = el;
-        };
-        if (isSelf) {
-            tryFind('local-screen-share');
-            tryFind('local-camera');
-        } else {
-            tryFind('remote-screen-share-screen-' + uid);
-            tryFind('remote-cam-camera-' + uid);
-        }
+        const tiles = tilesByUser.get(userKey) || [];
+        const cameraTile = tiles.find(t => t.kind === 'camera');
+        const screenTile = tiles.find(t => t.kind === 'screen');
+        const primary = cameraTile || screenTile; // camera on main card, screen gets its own card
 
         const avatarContainer = card.querySelector('.avatar-circle')?.closest('.absolute');
         let overlay = card.querySelector('.card-video-overlay');
 
-        if (primaryTile) {
-            const sourceVideo = primaryTile.querySelector('video');
+        if (primary) {
             if (!overlay) {
                 overlay = document.createElement('video');
                 overlay.className = 'card-video-overlay absolute inset-0 w-full h-full object-cover';
@@ -2024,18 +2052,12 @@ function attachUserPreviewsToCards() {
                 overlay.muted = true;
                 card.insertBefore(overlay, card.firstChild);
             }
-            // Mirror local camera so the user sees a natural self-view
-            overlay.style.transform = (isSelf && primaryTile.id === 'local-camera') ? 'scaleX(-1)' : '';
-            if (sourceVideo && overlay.srcObject !== sourceVideo.srcObject) {
-                overlay.srcObject = sourceVideo.srcObject;
-                overlay.play().catch(e => console.warn('Card video overlay play failed:', e));
-            }
+            syncVideoFromTile(overlay, primary.tileId, isSelf && primary.kind === 'camera');
             if (avatarContainer) avatarContainer.style.display = 'none';
             card.style.cursor = 'pointer';
-            const tileId = primaryTile.id;
             card.onclick = (e) => {
                 if (e.target.closest('button')) return;
-                setCamViewMode(tileId, 'expanded');
+                setCamViewMode(primary.tileId, 'expanded');
             };
         } else {
             if (overlay) { try { overlay.srcObject = null; } catch (_) {} overlay.remove(); }
@@ -2043,7 +2065,42 @@ function attachUserPreviewsToCards() {
             card.style.cursor = '';
             card.onclick = null;
         }
+
+        // When both camera AND screen share are active — add a synthetic screen card
+        if (cameraTile && screenTile) {
+            const screenCard = document.createElement('div');
+            screenCard.dataset.userId = uid;
+            screenCard.dataset.username = username;
+            screenCard.dataset.syntheticScreen = 'true';
+            screenCard.className = card.className;
+            screenCard.style.cursor = 'pointer';
+
+            const screenVideo = document.createElement('video');
+            screenVideo.className = 'card-video-overlay absolute inset-0 w-full h-full object-cover';
+            screenVideo.style.zIndex = '1';
+            screenVideo.autoplay = true;
+            screenVideo.playsInline = true;
+            screenVideo.muted = true;
+            screenCard.appendChild(screenVideo);
+            syncVideoFromTile(screenVideo, screenTile.tileId, false);
+
+            const label = document.createElement('div');
+            label.className = 'absolute bottom-2 left-2 z-10 text-xs text-white/80 bg-black/50 px-1.5 py-0.5 rounded';
+            label.textContent = username + ' · screen';
+            screenCard.appendChild(label);
+
+            screenCard.onclick = (e) => {
+                if (e.target.closest('button')) return;
+                setCamViewMode(screenTile.tileId, 'expanded');
+            };
+            card.insertAdjacentElement('afterend', screenCard);
+        }
     });
+
+    if (grid) {
+        const totalCards = grid.querySelectorAll('[data-user-id]').length;
+        setMeetGridColumns(grid, Math.max(1, totalCards));
+    }
 }
 
 function populateExpandedUsersRail() {
@@ -2054,35 +2111,8 @@ function populateExpandedUsersRail() {
         if (!!b.Speaking - !!a.Speaking !== 0) return !!b.Speaking - !!a.Speaking;
         return (a.Username || '').localeCompare(b.Username || '');
     });
-    const grid = document.getElementById('camera-grid');
     const selfName = document.getElementById('self-avatar')?.dataset?.username;
-
-    const mediaTilesByUser = new Map();
-    if (grid) {
-        grid.querySelectorAll('[id]').forEach(el => {
-            const id = el.id;
-            let userKey = null, kind = null;
-            if (id.startsWith('remote-cam-camera-')) {
-                userKey = id.replace('remote-cam-camera-', '');
-                kind = 'camera';
-            } else if (id.startsWith('remote-screen-share-screen-')) {
-                userKey = id.replace('remote-screen-share-screen-', '');
-                kind = 'screen';
-            } else if (id.startsWith('remote-cam-screen-')) {
-                userKey = id.replace('remote-cam-screen-', '');
-                kind = 'screen';
-            } else if (id === 'local-camera' && selfName) {
-                userKey = `self:${selfName}`;
-                kind = 'camera';
-            } else if (id === 'local-screen-share' && selfName) {
-                userKey = `self:${selfName}`;
-                kind = 'screen';
-            }
-            if (userKey == null) return;
-            if (!mediaTilesByUser.has(userKey)) mediaTilesByUser.set(userKey, []);
-            mediaTilesByUser.get(userKey).push({ tileId: id, kind });
-        });
-    }
+    const mediaTilesByUser = buildMediaTilesByUser(selfName);
 
     const addThumb = (u, opts) => {
         opts = opts || {};
@@ -2101,19 +2131,11 @@ function populateExpandedUsersRail() {
                 ${u.Muted ? '<svg class="w-3 h-3 text-vc-red flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : ''}
             </div>`;
         if (opts.tileId) {
-            const srcEl = document.getElementById(opts.tileId);
-            const srcVideo = srcEl ? srcEl.querySelector('video') : null;
             card.innerHTML = `
-                <video autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover ${opts.tileId === 'local-camera' ? '' : ''}"></video>
+                <video autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover"></video>
                 ${labelChip}
             `;
-            const v = card.querySelector('video');
-            if (srcVideo && srcVideo.srcObject) {
-                try { v.srcObject = srcVideo.srcObject; v.play().catch(() => {}); } catch (_) {}
-            }
-            if (opts.tileId === 'local-camera') {
-                v.style.transform = 'scaleX(-1)';
-            }
+            syncVideoFromTile(card.querySelector('video'), opts.tileId, opts.tileId === 'local-camera');
             card.addEventListener('click', () => swapMainStageWith(opts.tileId));
         } else {
             card.innerHTML = `
