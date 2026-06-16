@@ -67,6 +67,10 @@
             100% { transform: scale(1); }
         }
         #chat-panel.chat-hidden { display: none !important; }
+        /* Camera/screen tiles are the stream source; user cards are the visual grid.
+           Show camera-grid only when in spotlight mode. */
+        #camera-grid { display: none; }
+
         body.expanded-tile-mode #voice-area {
             padding: 0 !important;
             overflow: hidden !important;

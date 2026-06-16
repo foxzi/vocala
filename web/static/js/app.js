@@ -1000,18 +1000,8 @@ function syncAvatarTileVisibility() {
     if (!container) return;
     const grid = container.querySelector('.user-grid');
     if (!grid) return;
-    let visible = 0;
-    grid.querySelectorAll('[data-user-id]').forEach(card => {
-        const uid = card.dataset.userId;
-        const uname = card.dataset.username;
-        if (userHasCameraTile(uid, uname)) {
-            card.style.display = 'none';
-        } else {
-            card.style.display = '';
-            visible++;
-        }
-    });
-    setMeetGridColumns(grid, Math.max(1, visible));
+    // All user cards stay visible; video is shown inside them via attachUserPreviewsToCards().
+    setMeetGridColumns(grid, Math.max(1, grid.querySelectorAll('[data-user-id]').length));
 }
 
 function updateMainContent(channelID, users) {
@@ -1911,7 +1901,8 @@ function addScreenTileToGrid({ id, stream, label, track }) {
         track.onended = () => removeScreenTileFromGrid(id);
     }
 
-    // No auto-expand: tile joins the mosaic. User clicks to enter stage view.
+    // Screen share always enters spotlight so all participants see it prominently
+    setCamViewMode(id, 'expanded');
 }
 
 function removeScreenTileFromGrid(id) {
@@ -1999,77 +1990,59 @@ function attachUserPreviewsToCards() {
         const uid = card.dataset.userId;
         const username = card.dataset.username;
         const isSelf = username === selfName;
-        const tiles = [];
-        const tryAdd = (id, kind) => {
+
+        // Remove legacy small-thumbnail container from old layout if still present
+        const legacyPreviews = card.querySelector('.user-card-previews');
+        if (legacyPreviews) legacyPreviews.remove();
+
+        // Find primary video tile: screen share takes priority over camera
+        let primaryTile = null;
+        const tryFind = (id) => {
+            if (primaryTile) return;
             const el = document.getElementById(id);
-            if (el && el.querySelector('video')?.srcObject) tiles.push({ el, kind });
+            if (el && el.querySelector('video')?.srcObject) primaryTile = el;
         };
         if (isSelf) {
-            tryAdd('local-screen-share', 'screen');
-            tryAdd('local-camera', 'camera');
+            tryFind('local-screen-share');
+            tryFind('local-camera');
         } else {
-            tryAdd('remote-cam-screen-' + uid, 'screen');
-            tryAdd('remote-screen-share-screen-' + uid, 'screen');
-            tryAdd('remote-cam-camera-' + uid, 'camera');
+            tryFind('remote-screen-share-screen-' + uid);
+            tryFind('remote-cam-camera-' + uid);
         }
 
-        let container = card.querySelector('.user-card-previews');
-        if (!container) {
-            container = document.createElement('div');
-            container.className = 'user-card-previews w-full flex gap-1 justify-center';
-            container.style.minHeight = '44px';
-            card.appendChild(container);
-        }
+        const avatarContainer = card.querySelector('.avatar-circle')?.closest('.absolute');
+        let overlay = card.querySelector('.card-video-overlay');
 
-        if (tiles.length === 0) {
-            container.innerHTML = '';
-            card.onclick = null;
+        if (primaryTile) {
+            const sourceVideo = primaryTile.querySelector('video');
+            if (!overlay) {
+                overlay = document.createElement('video');
+                overlay.className = 'card-video-overlay absolute inset-0 w-full h-full object-cover';
+                overlay.style.zIndex = '1';
+                overlay.autoplay = true;
+                overlay.playsInline = true;
+                overlay.muted = true;
+                card.insertBefore(overlay, card.firstChild);
+            }
+            // Mirror local camera so the user sees a natural self-view
+            overlay.style.transform = (isSelf && primaryTile.id === 'local-camera') ? 'scaleX(-1)' : '';
+            if (sourceVideo && overlay.srcObject !== sourceVideo.srcObject) {
+                overlay.srcObject = sourceVideo.srcObject;
+                overlay.play().catch(e => console.warn('Card video overlay play failed:', e));
+            }
+            if (avatarContainer) avatarContainer.style.display = 'none';
+            card.style.cursor = 'pointer';
+            const tileId = primaryTile.id;
+            card.onclick = (e) => {
+                if (e.target.closest('button')) return;
+                setCamViewMode(tileId, 'expanded');
+            };
+        } else {
+            if (overlay) { try { overlay.srcObject = null; } catch (_) {} overlay.remove(); }
+            if (avatarContainer) avatarContainer.style.display = '';
             card.style.cursor = '';
-            return;
+            card.onclick = null;
         }
-
-        const wantedIds = new Set(tiles.map(t => t.el.id));
-        container.querySelectorAll('[data-tile-id]').forEach(node => {
-            if (!wantedIds.has(node.dataset.tileId)) node.remove();
-        });
-
-        tiles.forEach(({ el, kind }) => {
-            const tileId = el.id;
-            let item = container.querySelector(`[data-tile-id="${tileId}"]`);
-            if (!item) {
-                item = document.createElement('div');
-                item.dataset.tileId = tileId;
-                item.className = 'relative rounded-md overflow-hidden bg-black aspect-video cursor-pointer border border-vc-border hover:border-vc-accent transition flex-shrink-0';
-                item.style.width = '72px';
-                const v = document.createElement('video');
-                v.autoplay = true;
-                v.playsInline = true;
-                v.muted = true;
-                v.className = 'w-full h-full object-cover';
-                item.appendChild(v);
-                const badge = document.createElement('div');
-                badge.className = 'absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full bg-black/70 flex items-center justify-center';
-                badge.innerHTML = kind === 'screen'
-                    ? '<svg class="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>'
-                    : '<svg class="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 10l4.5-2.3v8.6L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>';
-                item.title = kind === 'screen' ? 'View screen share' : 'View camera';
-                item.appendChild(badge);
-                item.onclick = (e) => {
-                    e.stopPropagation();
-                    setCamViewMode(tileId, 'expanded');
-                };
-                container.appendChild(item);
-            }
-            const v = item.querySelector('video');
-            const sourceVideo = el.querySelector('video');
-            if (sourceVideo && v.srcObject !== sourceVideo.srcObject) {
-                v.srcObject = sourceVideo.srcObject;
-                v.play().catch(() => {});
-            }
-        });
-
-        card.onclick = null;
-        card.style.cursor = '';
     });
 }
 
@@ -2716,6 +2689,15 @@ function setCamViewMode(camId, mode) {
         }
         const video = wrapper.querySelector('video');
         if (video) video.className = 'w-full h-full object-contain';
+        let closeBtn = wrapper.querySelector('.cam-close-btn');
+        if (!closeBtn) {
+            closeBtn = document.createElement('button');
+            closeBtn.className = 'cam-close-btn absolute top-4 right-4 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
+            closeBtn.title = 'Exit spotlight (Esc)';
+            closeBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
+            closeBtn.onclick = (e) => { e.stopPropagation(); setCamViewMode(camId, 'default'); };
+            wrapper.appendChild(closeBtn);
+        }
         let railBtn = wrapper.querySelector('.cam-rail-btn');
         if (!railBtn) {
             railBtn = document.createElement('button');
