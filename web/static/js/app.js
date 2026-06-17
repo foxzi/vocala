@@ -2070,7 +2070,7 @@ function attachUserPreviewsToCards() {
         if (cameraTile && screenTile) {
             const screenCard = document.createElement('div');
             screenCard.dataset.userId = uid;
-            screenCard.dataset.username = username;
+            screenCard.dataset.ownerUsername = username;
             screenCard.dataset.syntheticScreen = 'true';
             screenCard.className = card.className;
             screenCard.style.cursor = 'pointer';
