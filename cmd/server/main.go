@@ -116,25 +116,6 @@ func (l *ipLimiter) cleanup() {
 
 var limiter = newIPLimiter()
 
-// Per-user rate limiter for expensive actions (Quick room creation).
-type userLimiterStore struct {
-	mu       sync.Mutex
-	limiters map[int64]*rate.Limiter
-}
-
-func (s *userLimiterStore) get(userID int64) *rate.Limiter {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if l, ok := s.limiters[userID]; ok {
-		return l
-	}
-	// 10 quick-rooms/hour, burst of 3.
-	l := rate.NewLimiter(rate.Every(6*time.Minute), 3)
-	s.limiters[userID] = l
-	return l
-}
-
-var quickRoomLimiter = &userLimiterStore{limiters: map[int64]*rate.Limiter{}}
 
 func clientIP(r *http.Request) string {
 	// Only trust X-Forwarded-For when behind reverse proxy (RemoteAddr is loopback)
@@ -545,8 +526,7 @@ func main() {
 	// App routes
 	mux.HandleFunc("/", requireAuth(handleApp))
 	mux.HandleFunc("/channels", requireAuth(csrfProtect(handleChannels)))
-	mux.HandleFunc("/channels/quick", requireAuth(csrfProtect(handleQuickRoom)))
-	mux.HandleFunc("/channels/delete", requireAuth(csrfProtect(handleDeleteChannel)))
+mux.HandleFunc("/channels/delete", requireAuth(csrfProtect(handleDeleteChannel)))
 	mux.HandleFunc("/channels/privacy", requireAuth(csrfProtect(handleChannelPrivacy)))
 	mux.HandleFunc("/channels/members", requireAuth(csrfProtect(handleChannelMembers)))
 	mux.HandleFunc("/channels/members/add", requireAuth(csrfProtect(handleChannelMemberAdd)))
@@ -884,37 +864,6 @@ func handleChannels(w http.ResponseWriter, r *http.Request) {
 	templates["app.html"].ExecuteTemplate(w, "channel-list", data)
 }
 
-func handleQuickRoom(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	user := userFromContext(r)
-	if !quickRoomLimiter.get(user.ID).Allow() {
-		http.Error(w, "too many quick rooms, please wait a few minutes", http.StatusTooManyRequests)
-		return
-	}
-	ch, err := channel.CreateEphemeral("Quick", user.ID, 0)
-	if err != nil {
-		logger.Error("quick room create failed: %v", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	token, err := channel.CreateGuestInvite(ch.ID, user.ID, 24)
-	if err != nil {
-		logger.Error("quick room guest-invite failed: %v", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"id":          ch.ID,
-		"name":        ch.Name,
-		"url":         "/channels/" + ch.Name,
-		"guest_url":   fmt.Sprintf("/guest/%s", token),
-		"guest_token": token,
-	})
-}
 
 func handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
