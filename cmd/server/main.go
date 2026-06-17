@@ -116,7 +116,6 @@ func (l *ipLimiter) cleanup() {
 
 var limiter = newIPLimiter()
 
-
 func clientIP(r *http.Request) string {
 	// Only trust X-Forwarded-For when behind reverse proxy (RemoteAddr is loopback)
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
@@ -526,7 +525,7 @@ func main() {
 	// App routes
 	mux.HandleFunc("/", requireAuth(handleApp))
 	mux.HandleFunc("/channels", requireAuth(csrfProtect(handleChannels)))
-mux.HandleFunc("/channels/delete", requireAuth(csrfProtect(handleDeleteChannel)))
+	mux.HandleFunc("/channels/delete", requireAuth(csrfProtect(handleDeleteChannel)))
 	mux.HandleFunc("/channels/privacy", requireAuth(csrfProtect(handleChannelPrivacy)))
 	mux.HandleFunc("/channels/members", requireAuth(csrfProtect(handleChannelMembers)))
 	mux.HandleFunc("/channels/members/add", requireAuth(csrfProtect(handleChannelMemberAdd)))
@@ -863,7 +862,6 @@ func handleChannels(w http.ResponseWriter, r *http.Request) {
 	// Return just the channel list partial for HTMX
 	templates["app.html"].ExecuteTemplate(w, "channel-list", data)
 }
-
 
 func handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
