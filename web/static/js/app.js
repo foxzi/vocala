@@ -1861,7 +1861,7 @@ function addScreenTileToGrid({ id, stream, label, track }) {
             try { v.pause(); } catch (_) {}
             v.srcObject = null;
             v.srcObject = stream;
-            v.play().catch(() => {});
+            v.play().catch(e => console.warn('Screen share video play failed:', e));
         }
         return;
     }
