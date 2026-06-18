@@ -4062,30 +4062,6 @@ async function startDMWithUser(userId, username) {
     }
 }
 
-async function startQuickRoom() {
-    try {
-        const fd = new FormData();
-        fd.append('csrf_token', getCSRFToken());
-        const res = await fetch('/channels/quick', {
-            method: 'POST',
-            body: fd,
-        });
-        if (!res.ok) {
-            showToast('Failed to create quick room');
-            return;
-        }
-        const data = await res.json();
-        const shareUrl = location.origin + (data.guest_url || data.url);
-        try {
-            await navigator.clipboard.writeText(shareUrl);
-            showToast('Guest link copied');
-        } catch (_) {
-        }
-        joinChannel(data.id, data.name);
-    } catch (err) {
-        console.error('Quick room failed:', err);
-    }
-}
 
 function showHuddleInvite(msg) {
     if (currentChannelID === msg.channel_id && isDMHuddleActive) return;
