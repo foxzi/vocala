@@ -1863,7 +1863,7 @@ function addScreenTileToGrid({ id, stream, label, track }) {
         if (track) {
             existing.dataset.trackId = track.id;
             track.onended = () => {
-                if (existing.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+                if (document.getElementById(id)?.dataset.trackId === track.id) removeScreenTileFromGrid(id);
             };
         }
         // Sync stale srcObject copies in preview cards and expanded rail.
@@ -1920,7 +1920,7 @@ function addScreenTileToGrid({ id, stream, label, track }) {
     if (track) {
         wrapper.dataset.trackId = track.id;
         track.onended = () => {
-            if (wrapper.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+            if (document.getElementById(id)?.dataset.trackId === track.id) removeScreenTileFromGrid(id);
         };
     }
 
@@ -2668,13 +2668,15 @@ function handleRemoteCameraTrack(stream, track) {
 
     wrapper.dataset.trackId = track.id;
     track.onended = () => {
-        if (wrapper.dataset.trackId === track.id) removeFromCameraGrid(camId);
+        if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
     };
 
     let muteTimer = null;
     track.onmute = () => {
-        if (wrapper.dataset.trackId === track.id)
-            muteTimer = setTimeout(() => removeFromCameraGrid(camId), 5000);
+        if (document.getElementById(camId)?.dataset.trackId === track.id)
+            muteTimer = setTimeout(() => {
+                if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
+            }, 5000);
     };
     track.onunmute = () => {
         if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
