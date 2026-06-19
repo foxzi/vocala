@@ -1492,9 +1492,7 @@ async function startWebRTC() {
 
                 if (streamId.startsWith('camera')) {
                     // Remote camera — add to camera grid
-                    // Use mid (media line ID) as stable identifier
-                    const mid = event.transceiver ? event.transceiver.mid : null;
-                    handleRemoteCameraTrack(stream, event.track, mid);
+                    handleRemoteCameraTrack(stream, event.track);
                 } else if (streamId.startsWith('screen')) {
                     // Screen share — showRemoteVideo handles dedup by stream.id
                     showRemoteVideo(stream, event.track);
@@ -1599,8 +1597,7 @@ async function startWebRTC() {
                     const stream = event.streams[0] || new MediaStream([event.track]);
                     const streamId = stream.id || '';
                     if (streamId.startsWith('camera')) {
-                        const mid = event.transceiver ? event.transceiver.mid : null;
-                        handleRemoteCameraTrack(stream, event.track, mid);
+                        handleRemoteCameraTrack(stream, event.track);
                     } else if (streamId.startsWith('screen')) {
                         showRemoteVideo(stream, event.track);
                     } else {
@@ -2571,7 +2568,7 @@ function addLocalCameraToGrid() {
     updateGridColumns();
 }
 
-function handleRemoteCameraTrack(stream, track, mid) {
+function handleRemoteCameraTrack(stream, track) {
     ensureCameraGrid();
     const grid = document.getElementById('camera-grid');
     if (!grid) return;
