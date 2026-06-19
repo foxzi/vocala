@@ -2777,8 +2777,11 @@ function setCamViewMode(camId, mode) {
 }
 
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && document.fullscreenElement) {
+    if (e.key !== 'Escape') return;
+    if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
+    } else if (expandedCamId) {
+        setCamViewMode(expandedCamId, 'default');
     }
 });
 
