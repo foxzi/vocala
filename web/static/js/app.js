@@ -1863,6 +1863,11 @@ function addScreenTileToGrid({ id, stream, label, track }) {
             v.srcObject = stream;
             v.play().catch(e => console.warn('Screen share video play failed:', e));
         }
+        // Sync stale srcObject copies in preview cards and expanded rail.
+        attachUserPreviewsToCards();
+        if (document.body.classList.contains('expanded-tile-mode')) {
+            populateExpandedUsersRail();
+        }
         return;
     }
 
@@ -2648,7 +2653,10 @@ function handleRemoteCameraTrack(stream, track, mid) {
     updateGridColumns();
 
     // If this tile was the spotlight before renegotiation replaced it, restore that state.
+    // Clear expanded-tile-mode first so setCamViewMode rebuilds the rail from scratch
+    // (otherwise it calls updateRailMainStageHighlight which skips srcObject resync).
     if (wasExpanded) {
+        document.body.classList.remove('expanded-tile-mode');
         setCamViewMode(camId, 'expanded');
     }
 
