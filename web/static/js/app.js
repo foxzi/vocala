@@ -2039,7 +2039,8 @@ function attachUserPreviewsToCards() {
         const screenTile = tiles.find(t => t.kind === 'screen');
         const primary = cameraTile || screenTile; // camera on main card, screen gets its own card
 
-        const avatarContainer = card.querySelector('.avatar-circle')?.closest('.absolute');
+        const avatarCircle = card.querySelector('.avatar-circle');
+        const muteIndicator = card.querySelector('.mute-indicator');
         let overlay = card.querySelector('.card-video-overlay');
 
         if (primary) {
@@ -2057,7 +2058,8 @@ function attachUserPreviewsToCards() {
                 overlay.classList.toggle('object-contain', primary.kind === 'screen');
             }
             syncVideoFromTile(overlay, primary.tileId, isSelf && primary.kind === 'camera');
-            if (avatarContainer) avatarContainer.style.display = 'none';
+            if (avatarCircle) avatarCircle.style.visibility = 'hidden';
+            if (muteIndicator) muteIndicator.style.zIndex = '10';
             card.style.cursor = 'pointer';
             card.onclick = (e) => {
                 if (e.target.closest('button')) return;
@@ -2065,7 +2067,8 @@ function attachUserPreviewsToCards() {
             };
         } else {
             if (overlay) { try { overlay.srcObject = null; } catch (_) {} overlay.remove(); }
-            if (avatarContainer) avatarContainer.style.display = '';
+            if (avatarCircle) avatarCircle.style.visibility = '';
+            if (muteIndicator) muteIndicator.style.zIndex = '';
             card.style.cursor = '';
             card.onclick = null;
         }
@@ -2786,7 +2789,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
-    } else if (expandedCamId) {
+    } else if (expandedCamId && !document.getElementById('confirm-modal')) {
         setCamViewMode(expandedCamId, 'default');
     }
 });
