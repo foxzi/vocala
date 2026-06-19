@@ -1853,6 +1853,8 @@ function addScreenTileToGrid({ id, stream, label, track }) {
             v.srcObject = stream;
             v.play().catch(() => {});
         }
+        attachUserPreviewsToCards();
+        if (document.body.classList.contains('expanded-tile-mode')) populateExpandedUsersRail();
         return;
     }
 
@@ -2522,6 +2524,8 @@ function addLocalCameraToGrid() {
             v.srcObject = cameraStream;
             v.play().catch(() => {});
         }
+        attachUserPreviewsToCards();
+        if (document.body.classList.contains('expanded-tile-mode')) populateExpandedUsersRail();
         return;
     }
 
@@ -2589,6 +2593,8 @@ function handleRemoteCameraTrack(stream, track, mid) {
                 video.play().catch(() => {});
             }
             existing.dataset.trackId = track.id;
+            attachUserPreviewsToCards();
+            if (document.body.classList.contains('expanded-tile-mode')) populateExpandedUsersRail();
             return;
         }
     }
