@@ -1860,6 +1860,12 @@ function addScreenTileToGrid({ id, stream, label, track }) {
             v.srcObject = stream;
             v.play().catch(e => console.warn('Screen share video play failed:', e));
         }
+        if (track) {
+            existing.dataset.trackId = track.id;
+            track.onended = () => {
+                if (existing.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+            };
+        }
         // Sync stale srcObject copies in preview cards and expanded rail.
         attachUserPreviewsToCards();
         if (document.body.classList.contains('expanded-tile-mode')) {
@@ -1912,7 +1918,10 @@ function addScreenTileToGrid({ id, stream, label, track }) {
     updateGridColumns();
 
     if (track) {
-        track.onended = () => removeScreenTileFromGrid(id);
+        wrapper.dataset.trackId = track.id;
+        track.onended = () => {
+            if (wrapper.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+        };
     }
 
     // No auto-expand: tile joins the mosaic. User clicks to enter stage view.
@@ -2657,11 +2666,15 @@ function handleRemoteCameraTrack(stream, track) {
         setCamViewMode(camId, 'expanded');
     }
 
-    track.onended = () => removeFromCameraGrid(camId);
+    wrapper.dataset.trackId = track.id;
+    track.onended = () => {
+        if (wrapper.dataset.trackId === track.id) removeFromCameraGrid(camId);
+    };
 
     let muteTimer = null;
     track.onmute = () => {
-        muteTimer = setTimeout(() => removeFromCameraGrid(camId), 5000);
+        if (wrapper.dataset.trackId === track.id)
+            muteTimer = setTimeout(() => removeFromCameraGrid(camId), 5000);
     };
     track.onunmute = () => {
         if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
