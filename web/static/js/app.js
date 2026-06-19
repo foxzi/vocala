@@ -2043,14 +2043,18 @@ function attachUserPreviewsToCards() {
         let overlay = card.querySelector('.card-video-overlay');
 
         if (primary) {
+            const fitClass = primary.kind === 'screen' ? 'object-contain' : 'object-cover';
             if (!overlay) {
                 overlay = document.createElement('video');
-                overlay.className = 'card-video-overlay absolute inset-0 w-full h-full object-cover';
+                overlay.className = `card-video-overlay absolute inset-0 w-full h-full ${fitClass}`;
                 overlay.style.zIndex = '1';
                 overlay.autoplay = true;
                 overlay.playsInline = true;
                 overlay.muted = true;
                 card.insertBefore(overlay, card.firstChild);
+            } else {
+                overlay.classList.toggle('object-cover', primary.kind !== 'screen');
+                overlay.classList.toggle('object-contain', primary.kind === 'screen');
             }
             syncVideoFromTile(overlay, primary.tileId, isSelf && primary.kind === 'camera');
             if (avatarContainer) avatarContainer.style.display = 'none';
@@ -2076,7 +2080,7 @@ function attachUserPreviewsToCards() {
             screenCard.style.cursor = 'pointer';
 
             const screenVideo = document.createElement('video');
-            screenVideo.className = 'card-video-overlay absolute inset-0 w-full h-full object-cover';
+            screenVideo.className = 'card-video-overlay absolute inset-0 w-full h-full object-contain';
             screenVideo.style.zIndex = '1';
             screenVideo.autoplay = true;
             screenVideo.playsInline = true;
@@ -2132,7 +2136,7 @@ function populateExpandedUsersRail() {
             </div>`;
         if (opts.tileId) {
             card.innerHTML = `
-                <video autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover"></video>
+                <video autoplay playsinline muted class="absolute inset-0 w-full h-full ${opts.kind === 'screen' ? 'object-contain' : 'object-cover'}"></video>
                 ${labelChip}
             `;
             syncVideoFromTile(card.querySelector('video'), opts.tileId, opts.tileId === 'local-camera');
@@ -2714,8 +2718,10 @@ function setCamViewMode(camId, mode) {
         let closeBtn = wrapper.querySelector('.cam-close-btn');
         if (!closeBtn) {
             closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
             closeBtn.className = 'cam-close-btn absolute top-4 right-4 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
             closeBtn.title = 'Exit spotlight (Esc)';
+            closeBtn.setAttribute('aria-label', 'Exit spotlight');
             closeBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
             closeBtn.onclick = (e) => { e.stopPropagation(); setCamViewMode(camId, 'default'); };
             wrapper.appendChild(closeBtn);
