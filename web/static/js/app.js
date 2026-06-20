@@ -2072,9 +2072,18 @@ function attachUserPreviewsToCards() {
             if (avatarCircle) avatarCircle.style.visibility = 'hidden';
             if (muteIndicator) muteIndicator.style.zIndex = '10';
             card.style.cursor = 'pointer';
+            card.setAttribute('role', 'button');
+            card.setAttribute('tabindex', '0');
+            card.setAttribute('aria-label', 'Click to spotlight');
             card.onclick = (e) => {
                 if (e.target.closest('button')) return;
                 setCamViewMode(primary.tileId, 'expanded');
+            };
+            card.onkeydown = (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setCamViewMode(primary.tileId, 'expanded');
+                }
             };
         } else {
             if (overlay) { try { overlay.srcObject = null; } catch (_) {} overlay.remove(); }
@@ -2082,6 +2091,10 @@ function attachUserPreviewsToCards() {
             if (muteIndicator) muteIndicator.style.zIndex = '';
             card.style.cursor = '';
             card.onclick = null;
+            card.onkeydown = null;
+            card.removeAttribute('role');
+            card.removeAttribute('tabindex');
+            card.removeAttribute('aria-label');
         }
 
         // When both camera AND screen share are active — add a synthetic screen card
