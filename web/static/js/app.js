@@ -2673,10 +2673,12 @@ function handleRemoteCameraTrack(stream, track) {
 
     let muteTimer = null;
     track.onmute = () => {
-        if (document.getElementById(camId)?.dataset.trackId === track.id)
+        if (document.getElementById(camId)?.dataset.trackId === track.id) {
+            clearTimeout(muteTimer);
             muteTimer = setTimeout(() => {
                 if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
             }, 5000);
+        }
     };
     track.onunmute = () => {
         if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
