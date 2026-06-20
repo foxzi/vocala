@@ -2129,7 +2129,7 @@ function populateExpandedUsersRail() {
         if (!!b.Speaking - !!a.Speaking !== 0) return !!b.Speaking - !!a.Speaking;
         return (a.Username || '').localeCompare(b.Username || '');
     });
-    const selfName = document.getElementById('self-avatar')?.dataset?.username;
+    const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
     const mediaTilesByUser = buildMediaTilesByUser(selfName);
 
     const addThumb = (u, opts) => {
@@ -2373,6 +2373,15 @@ function removeRemoteVideo() {
         el.remove();
     });
     updateGridColumns();
+    const wasMainGone = expandedCamId && !document.getElementById(expandedCamId);
+    if (wasMainGone) {
+        expandedCamId = null;
+        promoteNextMediaToMainStage();
+    }
+    if (!expandedCamId) {
+        document.body.classList.remove('expanded-tile-mode');
+        clearExpandedUsersRail();
+    }
 }
 
 function updateScreenShareUI() {
