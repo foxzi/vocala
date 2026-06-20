@@ -1853,6 +1853,12 @@ function addScreenTileToGrid({ id, stream, label, track }) {
             v.srcObject = stream;
             v.play().catch(() => {});
         }
+        if (track) {
+            existing.dataset.trackId = track.id;
+            track.onended = () => {
+                if (document.getElementById(id)?.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+            };
+        }
         attachUserPreviewsToCards();
         if (document.body.classList.contains('expanded-tile-mode')) populateExpandedUsersRail();
         return;
@@ -1900,7 +1906,10 @@ function addScreenTileToGrid({ id, stream, label, track }) {
     updateGridColumns();
 
     if (track) {
-        track.onended = () => removeScreenTileFromGrid(id);
+        wrapper.dataset.trackId = track.id;
+        track.onended = () => {
+            if (document.getElementById(id)?.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+        };
     }
 
     // Screen share always enters spotlight so all participants see it prominently
@@ -2581,6 +2590,11 @@ function handleRemoteCameraTrack(stream, track, mid) {
     if (existing) {
         const prevTrackId = existing.dataset.trackId;
         if (prevTrackId && prevTrackId !== track.id) {
+            if (expandedCamId === camId) {
+                document.body.classList.remove('expanded-tile-mode');
+                expandedCamId = null;
+                clearExpandedUsersRail();
+            }
             const v = existing.querySelector('video');
             if (v) { try { v.pause(); } catch (_) {} v.srcObject = null; }
             existing.remove();
@@ -2635,11 +2649,16 @@ function handleRemoteCameraTrack(stream, track, mid) {
     grid.appendChild(wrapper);
     updateGridColumns();
 
-    track.onended = () => removeFromCameraGrid(camId);
+    track.onended = () => {
+        if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
+    };
 
     let muteTimer = null;
     track.onmute = () => {
-        muteTimer = setTimeout(() => removeFromCameraGrid(camId), 5000);
+        if (document.getElementById(camId)?.dataset.trackId === track.id)
+            muteTimer = setTimeout(() => {
+                if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
+            }, 5000);
     };
     track.onunmute = () => {
         if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
