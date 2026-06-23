@@ -29,11 +29,22 @@ function escapeHTML(str) {
 // --- Sound notifications (Web Audio API, no external files) ---
 
 let notifSoundsEnabled = localStorage.getItem('vocala-sounds') !== 'off';
+let notifAudioContext = null;
+
+function getNotifAudioContext() {
+    if (!notifAudioContext || notifAudioContext.state === 'closed') {
+        notifAudioContext = new AudioContext();
+    }
+    if (notifAudioContext.state === 'suspended') {
+        notifAudioContext.resume().catch(() => {});
+    }
+    return notifAudioContext;
+}
 
 function playTone(freq, duration, type, vol) {
     if (!notifSoundsEnabled) return;
     try {
-        const ctx = new AudioContext();
+        const ctx = getNotifAudioContext();
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         osc.type = type || 'sine';
@@ -44,7 +55,6 @@ function playTone(freq, duration, type, vol) {
         gain.connect(ctx.destination);
         osc.start();
         osc.stop(ctx.currentTime + duration);
-        setTimeout(() => ctx.close(), (duration + 0.1) * 1000);
     } catch (e) {}
 }
 
