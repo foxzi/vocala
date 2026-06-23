@@ -127,6 +127,7 @@ func migrate() {
 		`ALTER TABLE channels ADD COLUMN dm_user_b INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE channels ADD COLUMN last_huddle_at INTEGER NOT NULL DEFAULT 0`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_channels_dm_pair ON channels(dm_user_a, dm_user_b) WHERE is_dm = 1`,
+		`ALTER TABLE channels ADD COLUMN is_group INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE chat_messages ADD COLUMN kind TEXT NOT NULL DEFAULT ''`,
 		`CREATE TABLE IF NOT EXISTS channel_last_read (
 			user_id INTEGER NOT NULL,

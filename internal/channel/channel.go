@@ -20,6 +20,7 @@ type Channel struct {
 	CreatedBy   int64
 	IsPrivate   bool
 	IsEphemeral bool
+	IsGroup     bool
 	IsDM        bool
 	DMUserA     int64
 	DMUserB     int64
@@ -148,8 +149,8 @@ func Delete(id int64) error {
 }
 
 // CreateEphemeral creates a private, ephemeral (auto-cleanup) channel.
-// Used by Quick rooms and Huddles. Returns the new channel and a slug-name.
-func CreateEphemeral(prefix string, createdBy int64, extraMember int64) (*Channel, error) {
+// Set isGroup=true for group huddle channels so they can be reliably listed without name-prefix hacks.
+func CreateEphemeral(prefix string, createdBy int64, extraMember int64, isGroup bool) (*Channel, error) {
 	suffix := make([]byte, 4)
 	if _, err := rand.Read(suffix); err != nil {
 		return nil, err
@@ -164,15 +165,19 @@ func CreateEphemeral(prefix string, createdBy int64, extraMember int64) (*Channe
 		_, _ = rand.Read(suffix)
 		name = fmt.Sprintf("%s-%s", prefix, hex.EncodeToString(suffix))
 	}
+	isGroupInt := 0
+	if isGroup {
+		isGroupInt = 1
+	}
 	res, err := database.DB.Exec(
-		"INSERT INTO channels (name, created_by, is_private, is_ephemeral) VALUES (?, ?, 1, 1)",
-		name, createdBy,
+		"INSERT INTO channels (name, created_by, is_private, is_ephemeral, is_group) VALUES (?, ?, 1, 1, ?)",
+		name, createdBy, isGroupInt,
 	)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	ch := &Channel{ID: id, Name: name, CreatedBy: createdBy, IsPrivate: true, IsEphemeral: true}
+	ch := &Channel{ID: id, Name: name, CreatedBy: createdBy, IsPrivate: true, IsEphemeral: true, IsGroup: isGroup}
 	AddMember(id, createdBy)
 	if extraMember > 0 && extraMember != createdBy {
 		AddMember(id, extraMember)
@@ -261,9 +266,9 @@ func OpenDM(userA, userB int64) (*Channel, error) {
 // "Add people to a huddle") where the user is a member.
 func ListGroupsForUser(userID int64) ([]Channel, error) {
 	rows, err := database.DB.Query(
-		`SELECT c.id, c.name, c.created_by, c.is_private, c.is_ephemeral, c.is_dm, c.dm_user_a, c.dm_user_b
+		`SELECT c.id, c.name, c.created_by, c.is_private, c.is_ephemeral, c.is_group, c.is_dm, c.dm_user_a, c.dm_user_b
 		 FROM channels c
-		 WHERE c.is_dm = 0 AND c.is_ephemeral = 1 AND c.name LIKE 'Group-%'
+		 WHERE c.is_group = 1
 		   AND (c.created_by = ? OR c.id IN (SELECT channel_id FROM channel_members WHERE user_id = ?))
 		 ORDER BY c.id DESC`,
 		userID, userID,
@@ -275,7 +280,7 @@ func ListGroupsForUser(userID int64) ([]Channel, error) {
 	var out []Channel
 	for rows.Next() {
 		var ch Channel
-		if err := rows.Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate, &ch.IsEphemeral, &ch.IsDM, &ch.DMUserA, &ch.DMUserB); err != nil {
+		if err := rows.Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate, &ch.IsEphemeral, &ch.IsGroup, &ch.IsDM, &ch.DMUserA, &ch.DMUserB); err != nil {
 			continue
 		}
 		out = append(out, ch)
@@ -637,31 +642,40 @@ func CreateInvite(channelID, createdBy int64) (string, error) {
 
 // AcceptInvite validates and uses an invite token, adding the user as a member.
 func AcceptInvite(token string, userID int64) (int64, error) {
-	var channelID int64
-	var expiresAt int64
-	var maxUses, uses int
-	err := database.DB.QueryRow(
-		`SELECT channel_id, expires_at, max_uses, uses FROM channel_invites WHERE token = ?`,
-		token,
-	).Scan(&channelID, &expiresAt, &maxUses, &uses)
+	now := time.Now().Unix()
+	// Atomically increment uses only if not expired and under max_uses limit.
+	// This prevents TOCTOU when concurrent requests hit the same near-limit invite.
+	result, err := database.DB.Exec(
+		`UPDATE channel_invites SET uses = uses + 1
+		 WHERE token = ? AND expires_at > ? AND (max_uses = 0 OR uses < max_uses)`,
+		token, now,
+	)
 	if err != nil {
-		return 0, fmt.Errorf("invite not found")
+		return 0, err
 	}
-	if time.Now().Unix() > expiresAt {
-		return 0, fmt.Errorf("invite expired")
-	}
-	if maxUses > 0 && uses >= maxUses {
+	if n, _ := result.RowsAffected(); n == 0 {
+		var expiresAt int64
+		var maxUses, uses int
+		err := database.DB.QueryRow(
+			`SELECT expires_at, max_uses, uses FROM channel_invites WHERE token = ?`, token,
+		).Scan(&expiresAt, &maxUses, &uses)
+		if err != nil {
+			return 0, fmt.Errorf("invite not found")
+		}
+		if now > expiresAt {
+			return 0, fmt.Errorf("invite expired")
+		}
 		return 0, fmt.Errorf("invite max uses reached")
 	}
-
-	// Add as member
+	var channelID int64
+	if err := database.DB.QueryRow(
+		`SELECT channel_id FROM channel_invites WHERE token = ?`, token,
+	).Scan(&channelID); err != nil {
+		return 0, err
+	}
 	if err := AddMember(channelID, userID); err != nil {
 		return 0, err
 	}
-
-	// Increment uses
-	database.DB.Exec(`UPDATE channel_invites SET uses = uses + 1 WHERE token = ?`, token)
-
 	return channelID, nil
 }
 
