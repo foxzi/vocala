@@ -1482,9 +1482,7 @@ async function startWebRTC() {
 
                 if (streamId.startsWith('camera')) {
                     // Remote camera — add to camera grid
-                    // Use mid (media line ID) as stable identifier
-                    const mid = event.transceiver ? event.transceiver.mid : null;
-                    handleRemoteCameraTrack(stream, event.track, mid);
+                    handleRemoteCameraTrack(stream, event.track);
                 } else if (streamId.startsWith('screen')) {
                     // Screen share — showRemoteVideo handles dedup by stream.id
                     showRemoteVideo(stream, event.track);
@@ -1589,8 +1587,7 @@ async function startWebRTC() {
                     const stream = event.streams[0] || new MediaStream([event.track]);
                     const streamId = stream.id || '';
                     if (streamId.startsWith('camera')) {
-                        const mid = event.transceiver ? event.transceiver.mid : null;
-                        handleRemoteCameraTrack(stream, event.track, mid);
+                        handleRemoteCameraTrack(stream, event.track);
                     } else if (streamId.startsWith('screen')) {
                         showRemoteVideo(stream, event.track);
                     } else {
@@ -1851,7 +1848,18 @@ function addScreenTileToGrid({ id, stream, label, track }) {
             try { v.pause(); } catch (_) {}
             v.srcObject = null;
             v.srcObject = stream;
-            v.play().catch(() => {});
+            v.play().catch(e => console.warn('Screen share video play failed:', e));
+        }
+        if (track) {
+            existing.dataset.trackId = track.id;
+            track.onended = () => {
+                if (document.getElementById(id)?.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+            };
+        }
+        // Sync stale srcObject copies in preview cards and expanded rail.
+        attachUserPreviewsToCards();
+        if (document.body.classList.contains('expanded-tile-mode')) {
+            populateExpandedUsersRail();
         }
         if (track) {
             existing.dataset.trackId = track.id;
@@ -1876,7 +1884,6 @@ function addScreenTileToGrid({ id, stream, label, track }) {
     video.muted = true;
     // object-contain (not cover) so the full shared screen is visible
     video.className = 'w-full h-full object-contain';
-    video.play().catch(() => {});
 
     const labelEl = document.createElement('div');
     labelEl.className = 'absolute bottom-2 left-2 bg-black/70 text-white text-xs px-2 py-1 rounded z-10';
@@ -1903,6 +1910,9 @@ function addScreenTileToGrid({ id, stream, label, track }) {
     wrapper.appendChild(controls);
     // Screen tiles always at the top of the grid
     grid.prepend(wrapper);
+    // Call play() after DOM attachment — calling it on a detached element can silently
+    // fail on browsers with strict autoplay policies (Safari, Firefox).
+    video.play().catch(e => console.warn('Screen share video play failed:', e));
     updateGridColumns();
 
     if (track) {
@@ -2601,7 +2611,7 @@ function addLocalCameraToGrid() {
     updateGridColumns();
 }
 
-function handleRemoteCameraTrack(stream, track, mid) {
+function handleRemoteCameraTrack(stream, track) {
     ensureCameraGrid();
     const grid = document.getElementById('camera-grid');
     if (!grid) return;
@@ -2609,24 +2619,29 @@ function handleRemoteCameraTrack(stream, track, mid) {
     // stream.id = "camera-{userID}" from SFU — stable across renegotiation
     const camId = 'remote-cam-' + stream.id;
     const existing = document.getElementById(camId);
+
+    // Remember if this tile was the spotlight so we can restore it after replacement.
+    // We check before any DOM mutation because the MutationObserver fires asynchronously
+    // and clears expandedCamId as a side-effect of seeing .expanded-tile disappear.
+    let wasExpanded = false;
+
     if (existing) {
         const prevTrackId = existing.dataset.trackId;
         if (prevTrackId && prevTrackId !== track.id) {
-            if (expandedCamId === camId) {
-                document.body.classList.remove('expanded-tile-mode');
-                expandedCamId = null;
-                clearExpandedUsersRail();
-            }
+            wasExpanded = expandedCamId === camId;
             const v = existing.querySelector('video');
             if (v) { try { v.pause(); } catch (_) {} v.srcObject = null; }
             existing.remove();
+            // Falls through to create a new tile below
         } else {
             const video = existing.querySelector('video');
             if (video) {
                 try { video.pause(); } catch (_) {}
                 video.srcObject = null;
-                video.srcObject = new MediaStream([track]);
-                video.play().catch(() => {});
+                // Use the stream object directly — creating new MediaStream([track]) would
+                // break existing srcObject copies held by rail thumbnails and preview cards.
+                video.srcObject = stream;
+                video.play().catch(e => console.warn('Camera video play failed:', e));
             }
             existing.dataset.trackId = track.id;
             attachUserPreviewsToCards();
@@ -2641,12 +2656,12 @@ function handleRemoteCameraTrack(stream, track, mid) {
     wrapper.className = 'rounded-xl overflow-hidden bg-black border border-vc-border aspect-video relative group cursor-pointer';
 
     const video = document.createElement('video');
-    video.srcObject = new MediaStream([track]);
+    // Use the stream object directly (see note above about new MediaStream).
+    video.srcObject = stream;
     video.autoplay = true;
     video.playsInline = true;
     video.muted = true;
     video.className = 'w-full h-full object-cover';
-    video.play().catch(() => {});
 
     // View mode controls (hover)
     const controls = document.createElement('div');
@@ -2669,7 +2684,15 @@ function handleRemoteCameraTrack(stream, track, mid) {
     wrapper.appendChild(video);
     wrapper.appendChild(controls);
     grid.appendChild(wrapper);
+    // Call play() after DOM attachment — calling it on a detached element can silently
+    // fail on browsers with strict autoplay policies (Safari, Firefox).
+    video.play().catch(e => console.warn('Camera video play failed:', e));
     updateGridColumns();
+
+    if (wasExpanded) {
+        document.body.classList.remove('expanded-tile-mode');
+        setCamViewMode(camId, 'expanded');
+    }
 
     track.onended = () => {
         if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
@@ -2677,10 +2700,12 @@ function handleRemoteCameraTrack(stream, track, mid) {
 
     let muteTimer = null;
     track.onmute = () => {
-        if (document.getElementById(camId)?.dataset.trackId === track.id)
+        if (document.getElementById(camId)?.dataset.trackId === track.id) {
+            clearTimeout(muteTimer);
             muteTimer = setTimeout(() => {
                 if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
             }, 5000);
+        }
     };
     track.onunmute = () => {
         if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
