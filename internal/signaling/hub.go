@@ -486,7 +486,20 @@ func handleBinaryMedia(c *Client, raw []byte) {
 	GlobalHub.mu.RUnlock()
 }
 
+var guestForbidden = map[string]bool{
+	"chat_message":         true,
+	"chat_reaction":        true,
+	"voice_reaction":       true,
+	"huddle_invite":        true,
+	"huddle_invite_others": true,
+	"huddle_end":           true,
+	"screen_preview":       true,
+}
+
 func handleMessage(c *Client, msg Message) {
+	if c.IsGuest && guestForbidden[msg.Type] {
+		return
+	}
 	switch msg.Type {
 	case "join_channel":
 		var p struct {
