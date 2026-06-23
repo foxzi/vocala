@@ -1026,7 +1026,7 @@ func handleMessage(c *Client, msg Message) {
 				otherID = ch.DMUserB
 			}
 			members := append([]int64{c.UserID, otherID}, p.UserIDs...)
-			newCh, err := channel.CreateEphemeral("Group", c.UserID, 0)
+			newCh, err := channel.CreateEphemeral("Group", c.UserID, 0, true)
 			if err != nil {
 				logger.Error("huddle: create group failed: %v", err)
 				return
