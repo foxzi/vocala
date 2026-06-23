@@ -193,6 +193,7 @@ let isScreenSharing = false;
 let screenPreviewInterval = null;
 let latestScreenPreview = null;
 let screenShareUsername = null;
+let userVolumes = {};
 
 // Camera state
 let cameraStream = null;
@@ -1461,18 +1462,17 @@ async function startWebRTC() {
         // Handle remote tracks
         peerConnection.ontrack = (event) => {
             if (event.track.kind === 'audio') {
+                const audioStreamId = event.streams[0]?.id || '';
+                if (document.querySelector(`audio[data-stream-id="${audioStreamId}"]`)) return;
                 const audio = new Audio();
                 audio.srcObject = event.streams[0];
                 audio.autoplay = true;
                 if (selectedSpkId && audio.setSinkId) {
                     audio.setSinkId(selectedSpkId).catch(() => {});
                 }
-                // Extract userID from stream.id "audio-{userID}"
-                const audioStreamId = event.streams[0]?.id || '';
                 const uid = audioStreamId.replace('audio-', '');
                 audio.dataset.streamId = audioStreamId;
                 audio.dataset.uid = uid;
-                // Apply local mute if user was muted
                 if (localMutedUsers.has(uid)) audio.muted = true;
                 document.body.appendChild(audio);
                 audio.play().catch(() => {});
@@ -1572,13 +1572,16 @@ async function startWebRTC() {
 
             peerConnection.ontrack = (event) => {
                 if (event.track.kind === 'audio') {
+                    const audioStreamId = event.streams[0]?.id || '';
+                    if (document.querySelector(`audio[data-stream-id="${audioStreamId}"]`)) return;
                     const audio = new Audio();
                     audio.srcObject = event.streams[0];
                     audio.autoplay = true;
                     if (selectedSpkId && audio.setSinkId) {
                         audio.setSinkId(selectedSpkId).catch(() => {});
                     }
-                    const uid = (event.streams[0]?.id || '').replace('audio-', '');
+                    const uid = audioStreamId.replace('audio-', '');
+                    audio.dataset.streamId = audioStreamId;
                     audio.dataset.uid = uid;
                     if (localMutedUsers.has(uid)) audio.muted = true;
                     document.body.appendChild(audio);
@@ -2933,6 +2936,11 @@ function cleanupWebRTC() {
     }
     screenSender = null;
     isScreenSharing = false;
+    document.querySelectorAll('audio[data-stream-id]').forEach(el => {
+        el.pause();
+        el.srcObject = null;
+        el.remove();
+    });
     removeRemoteVideo();
     removeLocalScreenPreview();
     // Cleanup camera
@@ -5337,10 +5345,8 @@ function saveSettings() {
 
 function adjustUserVolume(username, value) {
     const vol = parseInt(value) / 100;
-    setUserVolume(username, vol);
-    // Apply volume to all remote audio elements
-    // SFU assigns streamID "audio-{userID}" but we need username->userID mapping
-    // For now, apply to all audio (works well with small groups)
+    userVolumes[username] = vol;
+    localStorage.setItem('vocala-vol-' + username, vol);
     document.querySelectorAll('audio').forEach(el => {
         el.volume = vol;
     });
