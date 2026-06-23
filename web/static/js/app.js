@@ -1000,18 +1000,8 @@ function syncAvatarTileVisibility() {
     if (!container) return;
     const grid = container.querySelector('.user-grid');
     if (!grid) return;
-    let visible = 0;
-    grid.querySelectorAll('[data-user-id]').forEach(card => {
-        const uid = card.dataset.userId;
-        const uname = card.dataset.username;
-        if (userHasCameraTile(uid, uname)) {
-            card.style.display = 'none';
-        } else {
-            card.style.display = '';
-            visible++;
-        }
-    });
-    setMeetGridColumns(grid, Math.max(1, visible));
+    // All user cards stay visible; video is shown inside them via attachUserPreviewsToCards().
+    setMeetGridColumns(grid, Math.max(1, grid.querySelectorAll('[data-user-id]').length));
 }
 
 function updateMainContent(channelID, users) {
@@ -1863,6 +1853,14 @@ function addScreenTileToGrid({ id, stream, label, track }) {
             v.srcObject = stream;
             v.play().catch(() => {});
         }
+        if (track) {
+            existing.dataset.trackId = track.id;
+            track.onended = () => {
+                if (document.getElementById(id)?.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+            };
+        }
+        attachUserPreviewsToCards();
+        if (document.body.classList.contains('expanded-tile-mode')) populateExpandedUsersRail();
         return;
     }
 
@@ -1908,10 +1906,14 @@ function addScreenTileToGrid({ id, stream, label, track }) {
     updateGridColumns();
 
     if (track) {
-        track.onended = () => removeScreenTileFromGrid(id);
+        wrapper.dataset.trackId = track.id;
+        track.onended = () => {
+            if (document.getElementById(id)?.dataset.trackId === track.id) removeScreenTileFromGrid(id);
+        };
     }
 
-    // No auto-expand: tile joins the mosaic. User clicks to enter stage view.
+    // Screen share always enters spotlight so all participants see it prominently
+    setCamViewMode(id, 'expanded');
 }
 
 function removeScreenTileFromGrid(id) {
@@ -1992,85 +1994,144 @@ function observeCameraGrid() {
     _cameraGridObserver.observe(grid, { childList: true, subtree: true });
 }
 
+// Returns Map<userKey, [{tileId, kind}]> for all tiles with an active srcObject.
+// userKey is String(u.ID) for remote users, `self:${username}` for self.
+function buildMediaTilesByUser(selfName) {
+    const map = new Map();
+    const grid = document.getElementById('camera-grid');
+    if (!grid) return map;
+    grid.querySelectorAll('[id]').forEach(el => {
+        if (!el.querySelector('video')?.srcObject) return;
+        const id = el.id;
+        let userKey = null, kind = null;
+        if (id.startsWith('remote-cam-camera-'))          { userKey = id.replace('remote-cam-camera-', '');          kind = 'camera'; }
+        else if (id.startsWith('remote-screen-share-screen-')) { userKey = id.replace('remote-screen-share-screen-', ''); kind = 'screen'; }
+        else if (id.startsWith('remote-cam-screen-'))     { userKey = id.replace('remote-cam-screen-', '');          kind = 'screen'; }
+        else if (id === 'local-camera' && selfName)       { userKey = `self:${selfName}`;                            kind = 'camera'; }
+        else if (id === 'local-screen-share' && selfName) { userKey = `self:${selfName}`;                            kind = 'screen'; }
+        if (!userKey) return;
+        if (!map.has(userKey)) map.set(userKey, []);
+        map.get(userKey).push({ tileId: id, kind });
+    });
+    return map;
+}
+
+// Attaches srcObject from a camera-grid tile onto a <video> element.
+function syncVideoFromTile(videoEl, tileId, mirror) {
+    const src = document.getElementById(tileId)?.querySelector('video');
+    if (src?.srcObject && videoEl.srcObject !== src.srcObject) {
+        videoEl.srcObject = src.srcObject;
+        videoEl.play().catch(() => {});
+    }
+    videoEl.style.transform = mirror ? 'scaleX(-1)' : '';
+}
+
 function attachUserPreviewsToCards() {
-    const cards = document.querySelectorAll('#channel-view-users [data-user-id]');
     const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
+    const grid = document.querySelector('#channel-view-users .user-grid');
+
+    // Remove synthetic screen cards from a previous run before rebuilding
+    document.querySelectorAll('#channel-view-users [data-synthetic-screen]').forEach(el => el.remove());
+
+    const tilesByUser = buildMediaTilesByUser(selfName);
+
+    const cards = document.querySelectorAll('#channel-view-users [data-user-id]');
     cards.forEach(card => {
         const uid = card.dataset.userId;
         const username = card.dataset.username;
         const isSelf = username === selfName;
-        const tiles = [];
-        const tryAdd = (id, kind) => {
-            const el = document.getElementById(id);
-            if (el && el.querySelector('video')?.srcObject) tiles.push({ el, kind });
-        };
-        if (isSelf) {
-            tryAdd('local-screen-share', 'screen');
-            tryAdd('local-camera', 'camera');
+        const userKey = isSelf ? `self:${selfName}` : uid;
+
+        const legacyPreviews = card.querySelector('.user-card-previews');
+        if (legacyPreviews) legacyPreviews.remove();
+
+        const tiles = tilesByUser.get(userKey) || [];
+        const cameraTile = tiles.find(t => t.kind === 'camera');
+        const screenTile = tiles.find(t => t.kind === 'screen');
+        const primary = cameraTile || screenTile; // camera on main card, screen gets its own card
+
+        const avatarCircle = card.querySelector('.avatar-circle');
+        const muteIndicator = card.querySelector('.mute-indicator');
+        let overlay = card.querySelector('.card-video-overlay');
+
+        if (primary) {
+            const fitClass = primary.kind === 'screen' ? 'object-contain' : 'object-cover';
+            if (!overlay) {
+                overlay = document.createElement('video');
+                overlay.className = `card-video-overlay absolute inset-0 w-full h-full ${fitClass}`;
+                overlay.style.zIndex = '1';
+                overlay.autoplay = true;
+                overlay.playsInline = true;
+                overlay.muted = true;
+                card.insertBefore(overlay, card.firstChild);
+            } else {
+                overlay.classList.toggle('object-cover', primary.kind !== 'screen');
+                overlay.classList.toggle('object-contain', primary.kind === 'screen');
+            }
+            syncVideoFromTile(overlay, primary.tileId, isSelf && primary.kind === 'camera');
+            if (avatarCircle) avatarCircle.style.visibility = 'hidden';
+            if (muteIndicator) muteIndicator.style.zIndex = '10';
+            card.style.cursor = 'pointer';
+            card.setAttribute('role', 'button');
+            card.setAttribute('tabindex', '0');
+            card.setAttribute('aria-label', 'Click to spotlight');
+            card.onclick = (e) => {
+                if (e.target.closest('button')) return;
+                setCamViewMode(primary.tileId, 'expanded');
+            };
+            card.onkeydown = (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setCamViewMode(primary.tileId, 'expanded');
+                }
+            };
         } else {
-            tryAdd('remote-cam-screen-' + uid, 'screen');
-            tryAdd('remote-screen-share-screen-' + uid, 'screen');
-            tryAdd('remote-cam-camera-' + uid, 'camera');
-        }
-
-        let container = card.querySelector('.user-card-previews');
-        if (!container) {
-            container = document.createElement('div');
-            container.className = 'user-card-previews w-full flex gap-1 justify-center';
-            container.style.minHeight = '44px';
-            card.appendChild(container);
-        }
-
-        if (tiles.length === 0) {
-            container.innerHTML = '';
-            card.onclick = null;
+            if (overlay) { try { overlay.srcObject = null; } catch (_) {} overlay.remove(); }
+            if (avatarCircle) avatarCircle.style.visibility = '';
+            if (muteIndicator) muteIndicator.style.zIndex = '';
             card.style.cursor = '';
-            return;
+            card.onclick = null;
+            card.onkeydown = null;
+            card.removeAttribute('role');
+            card.removeAttribute('tabindex');
+            card.removeAttribute('aria-label');
         }
 
-        const wantedIds = new Set(tiles.map(t => t.el.id));
-        container.querySelectorAll('[data-tile-id]').forEach(node => {
-            if (!wantedIds.has(node.dataset.tileId)) node.remove();
-        });
+        // When both camera AND screen share are active — add a synthetic screen card
+        if (cameraTile && screenTile) {
+            const screenCard = document.createElement('div');
+            screenCard.dataset.userId = uid;
+            screenCard.dataset.ownerUsername = username;
+            screenCard.dataset.syntheticScreen = 'true';
+            screenCard.className = card.className;
+            screenCard.style.cursor = 'pointer';
 
-        tiles.forEach(({ el, kind }) => {
-            const tileId = el.id;
-            let item = container.querySelector(`[data-tile-id="${tileId}"]`);
-            if (!item) {
-                item = document.createElement('div');
-                item.dataset.tileId = tileId;
-                item.className = 'relative rounded-md overflow-hidden bg-black aspect-video cursor-pointer border border-vc-border hover:border-vc-accent transition flex-shrink-0';
-                item.style.width = '72px';
-                const v = document.createElement('video');
-                v.autoplay = true;
-                v.playsInline = true;
-                v.muted = true;
-                v.className = 'w-full h-full object-cover';
-                item.appendChild(v);
-                const badge = document.createElement('div');
-                badge.className = 'absolute top-0.5 right-0.5 w-3.5 h-3.5 rounded-full bg-black/70 flex items-center justify-center';
-                badge.innerHTML = kind === 'screen'
-                    ? '<svg class="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>'
-                    : '<svg class="w-2.5 h-2.5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M15 10l4.5-2.3v8.6L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>';
-                item.title = kind === 'screen' ? 'View screen share' : 'View camera';
-                item.appendChild(badge);
-                item.onclick = (e) => {
-                    e.stopPropagation();
-                    setCamViewMode(tileId, 'expanded');
-                };
-                container.appendChild(item);
-            }
-            const v = item.querySelector('video');
-            const sourceVideo = el.querySelector('video');
-            if (sourceVideo && v.srcObject !== sourceVideo.srcObject) {
-                v.srcObject = sourceVideo.srcObject;
-                v.play().catch(() => {});
-            }
-        });
+            const screenVideo = document.createElement('video');
+            screenVideo.className = 'card-video-overlay absolute inset-0 w-full h-full object-contain';
+            screenVideo.style.zIndex = '1';
+            screenVideo.autoplay = true;
+            screenVideo.playsInline = true;
+            screenVideo.muted = true;
+            screenCard.appendChild(screenVideo);
+            syncVideoFromTile(screenVideo, screenTile.tileId, false);
 
-        card.onclick = null;
-        card.style.cursor = '';
+            const label = document.createElement('div');
+            label.className = 'absolute bottom-2 left-2 z-10 text-xs text-white/80 bg-black/50 px-1.5 py-0.5 rounded';
+            label.textContent = username + ' · screen';
+            screenCard.appendChild(label);
+
+            screenCard.onclick = (e) => {
+                if (e.target.closest('button')) return;
+                setCamViewMode(screenTile.tileId, 'expanded');
+            };
+            card.insertAdjacentElement('afterend', screenCard);
+        }
     });
+
+    if (grid) {
+        const totalCards = grid.querySelectorAll('[data-user-id]').length;
+        setMeetGridColumns(grid, Math.max(1, totalCards));
+    }
 }
 
 function populateExpandedUsersRail() {
@@ -2081,35 +2142,8 @@ function populateExpandedUsersRail() {
         if (!!b.Speaking - !!a.Speaking !== 0) return !!b.Speaking - !!a.Speaking;
         return (a.Username || '').localeCompare(b.Username || '');
     });
-    const grid = document.getElementById('camera-grid');
-    const selfName = document.getElementById('self-avatar')?.dataset?.username;
-
-    const mediaTilesByUser = new Map();
-    if (grid) {
-        grid.querySelectorAll('[id]').forEach(el => {
-            const id = el.id;
-            let userKey = null, kind = null;
-            if (id.startsWith('remote-cam-camera-')) {
-                userKey = id.replace('remote-cam-camera-', '');
-                kind = 'camera';
-            } else if (id.startsWith('remote-screen-share-screen-')) {
-                userKey = id.replace('remote-screen-share-screen-', '');
-                kind = 'screen';
-            } else if (id.startsWith('remote-cam-screen-')) {
-                userKey = id.replace('remote-cam-screen-', '');
-                kind = 'screen';
-            } else if (id === 'local-camera' && selfName) {
-                userKey = `self:${selfName}`;
-                kind = 'camera';
-            } else if (id === 'local-screen-share' && selfName) {
-                userKey = `self:${selfName}`;
-                kind = 'screen';
-            }
-            if (userKey == null) return;
-            if (!mediaTilesByUser.has(userKey)) mediaTilesByUser.set(userKey, []);
-            mediaTilesByUser.get(userKey).push({ tileId: id, kind });
-        });
-    }
+    const selfName = document.getElementById('self-avatar')?.dataset?.username || window.VOCALA_GUEST_NAME;
+    const mediaTilesByUser = buildMediaTilesByUser(selfName);
 
     const addThumb = (u, opts) => {
         opts = opts || {};
@@ -2128,19 +2162,11 @@ function populateExpandedUsersRail() {
                 ${u.Muted ? '<svg class="w-3 h-3 text-vc-red flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : ''}
             </div>`;
         if (opts.tileId) {
-            const srcEl = document.getElementById(opts.tileId);
-            const srcVideo = srcEl ? srcEl.querySelector('video') : null;
             card.innerHTML = `
-                <video autoplay playsinline muted class="absolute inset-0 w-full h-full object-cover ${opts.tileId === 'local-camera' ? '' : ''}"></video>
+                <video autoplay playsinline muted class="absolute inset-0 w-full h-full ${opts.kind === 'screen' ? 'object-contain' : 'object-cover'}"></video>
                 ${labelChip}
             `;
-            const v = card.querySelector('video');
-            if (srcVideo && srcVideo.srcObject) {
-                try { v.srcObject = srcVideo.srcObject; v.play().catch(() => {}); } catch (_) {}
-            }
-            if (opts.tileId === 'local-camera') {
-                v.style.transform = 'scaleX(-1)';
-            }
+            syncVideoFromTile(card.querySelector('video'), opts.tileId, opts.tileId === 'local-camera');
             card.addEventListener('click', () => swapMainStageWith(opts.tileId));
         } else {
             card.innerHTML = `
@@ -2360,6 +2386,15 @@ function removeRemoteVideo() {
         el.remove();
     });
     updateGridColumns();
+    const wasMainGone = expandedCamId && !document.getElementById(expandedCamId);
+    if (wasMainGone) {
+        expandedCamId = null;
+        promoteNextMediaToMainStage();
+    }
+    if (!expandedCamId) {
+        document.body.classList.remove('expanded-tile-mode');
+        clearExpandedUsersRail();
+    }
 }
 
 function updateScreenShareUI() {
@@ -2520,6 +2555,8 @@ function addLocalCameraToGrid() {
             v.srcObject = cameraStream;
             v.play().catch(() => {});
         }
+        attachUserPreviewsToCards();
+        if (document.body.classList.contains('expanded-tile-mode')) populateExpandedUsersRail();
         return;
     }
 
@@ -2575,6 +2612,11 @@ function handleRemoteCameraTrack(stream, track, mid) {
     if (existing) {
         const prevTrackId = existing.dataset.trackId;
         if (prevTrackId && prevTrackId !== track.id) {
+            if (expandedCamId === camId) {
+                document.body.classList.remove('expanded-tile-mode');
+                expandedCamId = null;
+                clearExpandedUsersRail();
+            }
             const v = existing.querySelector('video');
             if (v) { try { v.pause(); } catch (_) {} v.srcObject = null; }
             existing.remove();
@@ -2587,6 +2629,8 @@ function handleRemoteCameraTrack(stream, track, mid) {
                 video.play().catch(() => {});
             }
             existing.dataset.trackId = track.id;
+            attachUserPreviewsToCards();
+            if (document.body.classList.contains('expanded-tile-mode')) populateExpandedUsersRail();
             return;
         }
     }
@@ -2627,11 +2671,16 @@ function handleRemoteCameraTrack(stream, track, mid) {
     grid.appendChild(wrapper);
     updateGridColumns();
 
-    track.onended = () => removeFromCameraGrid(camId);
+    track.onended = () => {
+        if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
+    };
 
     let muteTimer = null;
     track.onmute = () => {
-        muteTimer = setTimeout(() => removeFromCameraGrid(camId), 5000);
+        if (document.getElementById(camId)?.dataset.trackId === track.id)
+            muteTimer = setTimeout(() => {
+                if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
+            }, 5000);
     };
     track.onunmute = () => {
         if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
@@ -2716,6 +2765,17 @@ function setCamViewMode(camId, mode) {
         }
         const video = wrapper.querySelector('video');
         if (video) video.className = 'w-full h-full object-contain';
+        let closeBtn = wrapper.querySelector('.cam-close-btn');
+        if (!closeBtn) {
+            closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
+            closeBtn.className = 'cam-close-btn absolute top-4 right-4 z-20 p-2 rounded-lg bg-black/70 text-white hover:bg-white/20 transition';
+            closeBtn.title = 'Exit spotlight (Esc)';
+            closeBtn.setAttribute('aria-label', 'Exit spotlight');
+            closeBtn.innerHTML = '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
+            closeBtn.onclick = (e) => { e.stopPropagation(); setCamViewMode(camId, 'default'); };
+            wrapper.appendChild(closeBtn);
+        }
         let railBtn = wrapper.querySelector('.cam-rail-btn');
         if (!railBtn) {
             railBtn = document.createElement('button');
@@ -2773,8 +2833,11 @@ function setCamViewMode(camId, mode) {
 }
 
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && document.fullscreenElement) {
+    if (e.key !== 'Escape') return;
+    if (document.fullscreenElement) {
         document.exitFullscreen().catch(() => {});
+    } else if (expandedCamId && !document.getElementById('confirm-modal')) {
+        setCamViewMode(expandedCamId, 'default');
     }
 });
 
