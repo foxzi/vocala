@@ -11,6 +11,7 @@ import (
 	"html/template"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1031,7 +1032,7 @@ func handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
 
 	user, err := auth.Register(username, password)
 	if err != nil {
-		http.Redirect(w, r, "/admin?flash=Failed:+"+err.Error(), http.StatusSeeOther)
+		http.Redirect(w, r, "/admin?flash=Failed:+"+url.QueryEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
 
