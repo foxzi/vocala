@@ -345,18 +345,23 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 			peer.mu.Lock()
 			hint := peer.streamKinds[track.StreamID()]
 			delete(peer.streamKinds, track.StreamID())
+			expectScreen := peer.expectScreen
+			expectCamera := peer.expectCamera
+			if expectScreen && peer.screenTrack == nil {
+				peer.expectScreen = false
+			} else if expectCamera && peer.cameraTrack == nil {
+				peer.expectCamera = false
+			}
 			peer.mu.Unlock()
 			logger.Info("webrtc: classify video user %d streamID=%q hint=%q expectScreen=%v expectCamera=%v cameraTrack=%v screenTrack=%v",
-				userID, track.StreamID(), hint, peer.expectScreen, peer.expectCamera, peer.cameraTrack != nil, peer.screenTrack != nil)
+				userID, track.StreamID(), hint, expectScreen, expectCamera, peer.cameraTrack != nil, peer.screenTrack != nil)
 			if hint == "screen" && peer.screenTrack == nil {
 				s.handleScreenTrack(peer, userID, username, track)
 			} else if hint == "camera" && peer.cameraTrack == nil {
 				s.handleCameraTrack(peer, userID, username, track)
-			} else if peer.expectScreen && peer.screenTrack == nil {
-				peer.expectScreen = false
+			} else if expectScreen && peer.screenTrack == nil {
 				s.handleScreenTrack(peer, userID, username, track)
-			} else if peer.expectCamera && peer.cameraTrack == nil {
-				peer.expectCamera = false
+			} else if expectCamera && peer.cameraTrack == nil {
 				s.handleCameraTrack(peer, userID, username, track)
 			} else {
 				// No explicit hint (older client, or flag already consumed).
@@ -541,7 +546,9 @@ func (s *SFU) SetExpectCamera(userID int64, expect bool) {
 	peer, ok := s.peers[userID]
 	s.mu.RUnlock()
 	if ok {
+		peer.mu.Lock()
 		peer.expectCamera = expect
+		peer.mu.Unlock()
 	}
 }
 
@@ -551,7 +558,9 @@ func (s *SFU) SetExpectScreen(userID int64, expect bool) {
 	peer, ok := s.peers[userID]
 	s.mu.RUnlock()
 	if ok {
+		peer.mu.Lock()
 		peer.expectScreen = expect
+		peer.mu.Unlock()
 	}
 }
 
