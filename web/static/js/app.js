@@ -247,11 +247,13 @@ function connectWS() {
                 sendWS({ type: 'join_channel', payload: { channel_id: chID } });
             } else {
                 const wasCameraOn = isCameraOn;
+                const wasScreenSharing = isScreenSharing;
                 cleanupWebRTC();
                 currentChannelID = chID;
                 sendWS({ type: 'join_channel', payload: { channel_id: chID } });
                 startWebRTC().then(() => {
                     if (wasCameraOn) startCamera();
+                    if (wasScreenSharing) showScreenShareResumePrompt();
                 });
             }
         } else if (window.VOCALA_GUEST_CHANNEL) {
@@ -1546,8 +1548,12 @@ async function startWebRTC() {
         peerConnection.oniceconnectionstatechange = () => {
             updateRTCStatus();
             const st = peerConnection.iceConnectionState;
-            if (st === 'failed' || st === 'disconnected') {
-                console.warn('[vocala-diag] ICE state=' + st + ' — running diagnostic. Tip: run vocalaDiag() in console for details.');
+            if (st === 'failed') {
+                console.warn('[vocala-diag] ICE failed — triggering client-side restart');
+                diagPeerStats();
+                try { peerConnection.restartIce(); } catch (_) {}
+            } else if (st === 'disconnected') {
+                console.warn('[vocala-diag] ICE disconnected — running diagnostic. Tip: run vocalaDiag() in console for details.');
                 diagPeerStats();
             }
         };
@@ -3478,6 +3484,25 @@ function showDoubleLoginBanner() {
         reconnectAttempts = 0;
         connectWS();
     });
+    document.body.appendChild(banner);
+}
+
+function showScreenShareResumePrompt() {
+    if (document.getElementById('screen-resume-banner')) return;
+    const banner = document.createElement('div');
+    banner.id = 'screen-resume-banner';
+    banner.className = 'fixed top-0 inset-x-0 z-50 bg-vc-yellow/90 text-white px-4 py-3 text-sm flex items-center justify-center gap-3 shadow-lg';
+    banner.innerHTML = `
+        <span>Screen sharing was interrupted. Click to resume.</span>
+        <button class="px-3 py-1 rounded bg-white/20 hover:bg-white/30 transition">Resume sharing</button>
+        <button class="px-2 py-1 rounded bg-white/10 hover:bg-white/20 transition">Dismiss</button>
+    `;
+    const [resumeBtn, dismissBtn] = banner.querySelectorAll('button');
+    resumeBtn.addEventListener('click', () => {
+        banner.remove();
+        startScreenShare().catch(() => {});
+    });
+    dismissBtn.addEventListener('click', () => banner.remove());
     document.body.appendChild(banner);
 }
 
