@@ -382,10 +382,10 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 		logger.Debug("webrtc: peer %d ICE state: %s", userID, state.String())
 		switch state {
 		case webrtc.ICEConnectionStateDisconnected:
-			logger.Warn("webrtc: peer %d ICE disconnected — scheduling restart in 5s", userID)
+			logger.Warn("webrtc: peer %d ICE disconnected — scheduling restart in 2s", userID)
 			peer.mu.Lock()
 			if peer.iceRestartTimer == nil {
-				peer.iceRestartTimer = time.AfterFunc(5*time.Second, func() {
+				peer.iceRestartTimer = time.AfterFunc(2*time.Second, func() {
 					s.iceRestart(peer)
 				})
 			}

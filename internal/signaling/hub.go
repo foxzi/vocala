@@ -422,7 +422,7 @@ func (c *Client) readPump() {
 		c.Conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
 	})
-	wsLimiter := rate.NewLimiter(30, 60) // 30 msg/s, burst 60
+	wsLimiter := rate.NewLimiter(30, 200) // 30 msg/s, burst 200 (ICE candidate storms during restart)
 
 	for {
 		msgType, raw, err := c.Conn.ReadMessage()
