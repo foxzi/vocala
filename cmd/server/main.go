@@ -144,16 +144,26 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// recoverMiddleware turns a panic in any handler into a 500 instead of
-// crashing the whole process (net/http only recovers per-connection, which
-// doesn't help against panics that unwind the accept loop or a goroutine
-// spawned by a handler) — a single bad request shouldn't be able to take
-// down every other in-flight call.
+// recoverMiddleware logs a panic from a handler and returns a clean 500
+// instead of letting net/http's own per-connection recovery just abort the
+// connection with no response body. It does NOT protect against panics in
+// goroutines spawned by a handler (go func(){...}() from inside a handler)
+// — those still terminate the whole process, since they run outside this
+// deferred recover's call stack.
 func recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler {
+					// Sentinel used by net/http and friends (e.g. reverse
+					// proxies) to abort a response silently; must propagate.
+					panic(rec)
+				}
 				logger.Error("panic in handler %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				// The panic may have happened mid-write, leaving the
+				// connection's framing in an unknown state — close it
+				// instead of letting the server reuse it for keep-alive.
+				w.Header().Set("Connection", "close")
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
 		}()
