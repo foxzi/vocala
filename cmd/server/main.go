@@ -156,7 +156,7 @@ type hijackTrackingWriter struct {
 func (w *hijackTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hj, ok := w.ResponseWriter.(http.Hijacker)
 	if !ok {
-		return nil, nil, fmt.Errorf("hijackTrackingWriter: %w", http.ErrNotSupported)
+		return nil, nil, http.ErrNotSupported
 	}
 	conn, rw, err := hj.Hijack()
 	if err == nil {
