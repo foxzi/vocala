@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -144,6 +145,26 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// hijackTrackingWriter records whether the connection was handed off via
+// Hijack (e.g. a WebSocket upgrade) so recoverMiddleware knows not to
+// attempt an HTTP-level error response on it afterwards.
+type hijackTrackingWriter struct {
+	http.ResponseWriter
+	hijacked bool
+}
+
+func (w *hijackTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
+	}
+	conn, rw, err := hj.Hijack()
+	if err == nil {
+		w.hijacked = true
+	}
+	return conn, rw, err
+}
+
 // recoverMiddleware logs a panic from a handler and returns a clean 500
 // instead of letting net/http's own per-connection recovery just abort the
 // connection with no response body. It does NOT protect against panics in
@@ -152,14 +173,21 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 // deferred recover's call stack.
 func recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hw := &hijackTrackingWriter{ResponseWriter: w}
 		defer func() {
 			if rec := recover(); rec != nil {
-				if rec == http.ErrAbortHandler {
+				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 					// Sentinel used by net/http and friends (e.g. reverse
 					// proxies) to abort a response silently; must propagate.
 					panic(rec)
 				}
 				logger.Error("panic in handler %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				if hw.hijacked {
+					// Connection ownership already moved to the raw
+					// handler (e.g. a WebSocket upgrade) — an HTTP-level
+					// error response here would hit a hijacked connection.
+					return
+				}
 				// The panic may have happened mid-write, leaving the
 				// connection's framing in an unknown state — close it
 				// instead of letting the server reuse it for keep-alive.
@@ -167,7 +195,7 @@ func recoverMiddleware(next http.Handler) http.Handler {
 				http.Error(w, "internal server error", http.StatusInternalServerError)
 			}
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(hw, r)
 	})
 }
 
