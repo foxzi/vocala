@@ -156,7 +156,7 @@ type hijackTrackingWriter struct {
 func (w *hijackTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	hj, ok := w.ResponseWriter.(http.Hijacker)
 	if !ok {
-		return nil, nil, fmt.Errorf("underlying ResponseWriter does not support hijacking")
+		return nil, nil, fmt.Errorf("hijackTrackingWriter: %w", http.ErrNotSupported)
 	}
 	conn, rw, err := hj.Hijack()
 	if err == nil {
@@ -191,8 +191,8 @@ func recoverMiddleware(next http.Handler) http.Handler {
 				// The panic may have happened mid-write, leaving the
 				// connection's framing in an unknown state — close it
 				// instead of letting the server reuse it for keep-alive.
-				w.Header().Set("Connection", "close")
-				http.Error(w, "internal server error", http.StatusInternalServerError)
+				hw.Header().Set("Connection", "close")
+				http.Error(hw, "internal server error", http.StatusInternalServerError)
 			}
 		}()
 		next.ServeHTTP(hw, r)
