@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -139,6 +140,23 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// recoverMiddleware turns a panic in any handler into a 500 instead of
+// crashing the whole process (net/http only recovers per-connection, which
+// doesn't help against panics that unwind the accept loop or a goroutine
+// spawned by a handler) — a single bad request shouldn't be able to take
+// down every other in-flight call.
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.Error("panic in handler %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}()
 		next.ServeHTTP(w, r)
 	})
 }
@@ -557,7 +575,7 @@ func main() {
 	// WebSocket
 	mux.HandleFunc("/ws", signaling.HandleWebSocket)
 
-	handler := securityHeaders(rateLimitMiddleware(mux))
+	handler := recoverMiddleware(securityHeaders(rateLimitMiddleware(mux)))
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
