@@ -186,7 +186,11 @@ func recoverMiddleware(next http.Handler) http.Handler {
 					// Connection ownership already moved to the raw
 					// handler (e.g. a WebSocket upgrade) — an HTTP-level
 					// error response here would hit a hijacked connection.
-					return
+					// Re-panic so net/http's own per-connection recover
+					// (which checks Hijacked() before touching the
+					// connection) sees it too, instead of silently
+					// swallowing it here.
+					panic(rec)
 				}
 				// The panic may have happened mid-write, leaving the
 				// connection's framing in an unknown state — close it
