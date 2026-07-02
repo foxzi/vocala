@@ -211,6 +211,29 @@ func (h *Hub) BroadcastToChannel(channelID int64, msg []byte) {
 	}
 }
 
+// BroadcastToChannelExcept behaves like BroadcastToChannel but skips
+// excludeUserID, for events that are only meaningful to other participants
+// (e.g. a user's own camera_on echoing back to them triggers a spurious
+// client-side renegotiation since they never render a remote tile for
+// themselves).
+func (h *Hub) BroadcastToChannelExcept(channelID int64, excludeUserID int64, msg []byte) {
+	users := channel.GetUsers(channelID)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, u := range users {
+		if u.ID == excludeUserID {
+			continue
+		}
+		if client, ok := h.clients[u.ID]; ok {
+			select {
+			case client.Send <- msg:
+			default:
+			}
+		}
+	}
+}
+
 // BroadcastChatToChannel sends a chat-related message (chat_message,
 // chat_reaction, chat_reaction_remove, etc.) to both voice presence users
 // and chat-only watchers of the channel. For DM channels we strictly
@@ -715,12 +738,14 @@ func handleMessage(c *Client, msg Message) {
 			sfu.SetExpectCamera(c.UserID, true)
 			logger.Info("signaling: user %d expectCamera=true", c.UserID)
 		}
-		// Notify other clients
+		// Notify other clients (not the sender: their own client has no
+		// remote tile for itself, so self-delivery only serves to trigger
+		// a spurious "camera not received" renegotiation retry)
 		camOnMsg, _ := json.Marshal(map[string]any{
 			"type":    "camera_on",
 			"user_id": c.UserID,
 		})
-		GlobalHub.BroadcastToChannel(chID, camOnMsg)
+		GlobalHub.BroadcastToChannelExcept(chID, c.UserID, camOnMsg)
 
 	case "camera_off":
 		chID := channel.GetUserChannel(c.UserID)
