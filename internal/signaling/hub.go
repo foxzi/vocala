@@ -1,12 +1,11 @@
 package signaling
 
 import (
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"github.com/foxzi/vocala/internal/logger"
-	"math/big"
 	"net/http"
 	"sync"
 	"time"
@@ -288,6 +287,16 @@ func (h *Hub) SendToPriority(userID int64, msg []byte) {
 	}
 }
 
+// guestIDFromToken maps a guest session token to a stable negative UserID.
+// Same token -> same ID on every reconnect, which lets Hub.Register's
+// same-ID dedup close the previous connection for that guest instead of
+// leaving it registered as a ghost peer.
+func guestIDFromToken(token string) int64 {
+	sum := sha256.Sum256([]byte(token))
+	n := binary.BigEndian.Uint64(sum[:8]) % (1 << 50)
+	return -int64(n) - 1 // always negative, never 0
+}
+
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	var client *Client
 
@@ -332,9 +341,11 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			logger.Info("websocket upgrade error: %v", err)
 			return
 		}
-		// Use crypto/rand for guest ID to avoid collisions
-		randN, _ := rand.Int(rand.Reader, big.NewInt(1<<50))
-		guestID := -randN.Int64() - 1 // always negative, never 0
+		// Derive guest ID deterministically from the (stable) guest session
+		// token so a reconnecting guest maps to the same UserID every time.
+		// Register()'s same-ID dedup then closes the old connection instead
+		// of leaving a ghost peer behind until the pong timeout.
+		guestID := guestIDFromToken(guestToken)
 		client = &Client{
 			UserID:         guestID,
 			Username:       gs.GuestName + " (guest)",
