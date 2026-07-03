@@ -146,11 +146,13 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 }
 
 // hijackTrackingWriter records whether the connection was handed off via
-// Hijack (e.g. a WebSocket upgrade) so recoverMiddleware knows not to
-// attempt an HTTP-level error response on it afterwards.
+// Hijack (e.g. a WebSocket upgrade) and whether a response has already
+// started (WriteHeader/Write called), so recoverMiddleware knows it can no
+// longer safely attempt its own HTTP-level error response.
 type hijackTrackingWriter struct {
 	http.ResponseWriter
-	hijacked bool
+	hijacked    bool
+	wroteHeader bool
 }
 
 func (w *hijackTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
@@ -163,6 +165,18 @@ func (w *hijackTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		w.hijacked = true
 	}
 	return conn, rw, err
+}
+
+func (w *hijackTrackingWriter) WriteHeader(statusCode int) {
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *hijackTrackingWriter) Write(b []byte) (int, error) {
+	// A Write without a preceding WriteHeader implicitly commits a 200
+	// response, same as the stdlib ResponseWriter.
+	w.wroteHeader = true
+	return w.ResponseWriter.Write(b)
 }
 
 // Flush delegates to the underlying ResponseWriter's Flusher, if any.
@@ -200,21 +214,21 @@ func recoverMiddleware(next http.Handler) http.Handler {
 					panic(rec)
 				}
 				logger.Error("panic in handler %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
-				if hw.hijacked {
-					// Connection ownership already moved to the raw
-					// handler (e.g. a WebSocket upgrade) — an HTTP-level
-					// error response here would hit a hijacked connection.
-					// Re-panic (as ErrAbortHandler, since we already logged
-					// above and net/http's own recover skips logging only
-					// for that sentinel) so net/http's per-connection
-					// recover — which checks Hijacked() before touching the
-					// connection — sees it too, instead of us silently
-					// swallowing it here.
+				if hw.hijacked || hw.wroteHeader {
+					// Either connection ownership already moved to the raw
+					// handler (e.g. a WebSocket upgrade), or the response
+					// already started (headers/body written) — in both
+					// cases writing our own error response here would
+					// corrupt the stream rather than replace it. Re-panic
+					// as ErrAbortHandler (we already logged above, and
+					// net/http's own per-connection recover skips logging
+					// only for that exact sentinel) so net/http aborts the
+					// connection instead of us attempting a second write.
 					panic(http.ErrAbortHandler)
 				}
-				// The panic may have happened mid-write, leaving the
-				// connection's framing in an unknown state — close it
-				// instead of letting the server reuse it for keep-alive.
+				// Nothing was written yet, so a clean error response is
+				// safe. Close the connection afterwards rather than
+				// reusing it for keep-alive, out of caution.
 				hw.Header().Set("Connection", "close")
 				http.Error(hw, "internal server error", http.StatusInternalServerError)
 			}
