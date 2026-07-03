@@ -165,6 +165,24 @@ func (w *hijackTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return conn, rw, err
 }
 
+// Flush delegates to the underlying ResponseWriter's Flusher, if any.
+// Embedding http.ResponseWriter as an interface only promotes the methods
+// in that interface (Header/Write/WriteHeader) — optional capabilities like
+// http.Flusher on the concrete writer are otherwise silently hidden from
+// any handler wrapped by this middleware.
+func (w *hijackTrackingWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying ResponseWriter to http.ResponseController,
+// the standard (Go 1.20+) way callers should reach for optional writer
+// capabilities through a chain of wrappers like this one.
+func (w *hijackTrackingWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 // recoverMiddleware logs a panic from a handler and returns a clean 500
 // instead of letting net/http's own per-connection recovery just abort the
 // connection with no response body. It does NOT protect against panics in
@@ -186,11 +204,13 @@ func recoverMiddleware(next http.Handler) http.Handler {
 					// Connection ownership already moved to the raw
 					// handler (e.g. a WebSocket upgrade) — an HTTP-level
 					// error response here would hit a hijacked connection.
-					// Re-panic so net/http's own per-connection recover
-					// (which checks Hijacked() before touching the
-					// connection) sees it too, instead of silently
+					// Re-panic (as ErrAbortHandler, since we already logged
+					// above and net/http's own recover skips logging only
+					// for that sentinel) so net/http's per-connection
+					// recover — which checks Hijacked() before touching the
+					// connection — sees it too, instead of us silently
 					// swallowing it here.
-					panic(rec)
+					panic(http.ErrAbortHandler)
 				}
 				// The panic may have happened mid-write, leaving the
 				// connection's framing in an unknown state — close it
