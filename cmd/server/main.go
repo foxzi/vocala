@@ -208,9 +208,16 @@ func recoverMiddleware(next http.Handler) http.Handler {
 		hw := &hijackTrackingWriter{ResponseWriter: w}
 		defer func() {
 			if rec := recover(); rec != nil {
-				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+				if rec == http.ErrAbortHandler {
 					// Sentinel used by net/http and friends (e.g. reverse
-					// proxies) to abort a response silently; must propagate.
+					// proxies) to abort a response silently; must propagate
+					// unchanged. net/http's own recover matches this with
+					// exact equality (not errors.Is), so a wrapped value
+					// wouldn't be recognized as the sentinel further up the
+					// stack anyway — matching that exact-equality semantics
+					// here keeps both layers in sync instead of this
+					// middleware treating more values as "silent abort"
+					// than net/http itself does.
 					panic(rec)
 				}
 				logger.Error("panic in handler %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
