@@ -117,6 +117,12 @@ func (l *ipLimiter) cleanup() {
 
 var limiter = newIPLimiter()
 
+// wsPath is the WebSocket upgrade route. It has its own rate limiter
+// (wsLimiter) instead of the site-wide one, so it's registered separately
+// from the rest of mux — kept as a constant since both the route
+// registration and rateLimitMiddleware's carve-out need to agree on it.
+const wsPath = "/ws"
+
 // wsLimiter gates the /ws upgrade separately from the rest of the site.
 // A page load's static assets + API calls share `limiter`'s per-IP bucket;
 // without a dedicated bucket, that traffic (or a reconnect storm across
@@ -144,7 +150,7 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// /ws has its own dedicated limiter (wsRateLimitMiddleware) so it
 		// isn't starved by unrelated page/API traffic on the same IP.
-		if r.URL.Path == "/ws" {
+		if r.URL.Path == wsPath {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -580,7 +586,7 @@ func main() {
 	mux.HandleFunc("/admin/users/reset-password", requireAdmin(csrfProtect(handleAdminResetPassword)))
 
 	// WebSocket
-	mux.Handle("/ws", wsRateLimitMiddleware(http.HandlerFunc(signaling.HandleWebSocket)))
+	mux.Handle(wsPath, wsRateLimitMiddleware(http.HandlerFunc(signaling.HandleWebSocket)))
 
 	handler := securityHeaders(rateLimitMiddleware(mux))
 
