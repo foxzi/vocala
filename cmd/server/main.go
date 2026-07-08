@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -140,6 +142,105 @@ func rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		next.ServeHTTP(w, r)
+	})
+}
+
+// hijackTrackingWriter records whether the connection was handed off via
+// Hijack (e.g. a WebSocket upgrade) and whether a response has already
+// started (WriteHeader/Write called), so recoverMiddleware knows it can no
+// longer safely attempt its own HTTP-level error response.
+type hijackTrackingWriter struct {
+	http.ResponseWriter
+	hijacked    bool
+	wroteHeader bool
+}
+
+func (w *hijackTrackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := w.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, http.ErrNotSupported
+	}
+	conn, rw, err := hj.Hijack()
+	if err == nil {
+		w.hijacked = true
+	}
+	return conn, rw, err
+}
+
+func (w *hijackTrackingWriter) WriteHeader(statusCode int) {
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *hijackTrackingWriter) Write(b []byte) (int, error) {
+	// A Write without a preceding WriteHeader implicitly commits a 200
+	// response, same as the stdlib ResponseWriter.
+	w.wroteHeader = true
+	return w.ResponseWriter.Write(b)
+}
+
+// Flush delegates to the underlying ResponseWriter's Flusher, if any.
+// Embedding http.ResponseWriter as an interface only promotes the methods
+// in that interface (Header/Write/WriteHeader) — optional capabilities like
+// http.Flusher on the concrete writer are otherwise silently hidden from
+// any handler wrapped by this middleware.
+func (w *hijackTrackingWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying ResponseWriter to http.ResponseController,
+// the standard (Go 1.20+) way callers should reach for optional writer
+// capabilities through a chain of wrappers like this one.
+func (w *hijackTrackingWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// recoverMiddleware logs a panic from a handler and returns a clean 500
+// instead of letting net/http's own per-connection recovery just abort the
+// connection with no response body. It does NOT protect against panics in
+// goroutines spawned by a handler (go func(){...}() from inside a handler)
+// — those still terminate the whole process, since they run outside this
+// deferred recover's call stack.
+func recoverMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hw := &hijackTrackingWriter{ResponseWriter: w}
+		defer func() {
+			if rec := recover(); rec != nil {
+				if rec == http.ErrAbortHandler {
+					// Sentinel used by net/http and friends (e.g. reverse
+					// proxies) to abort a response silently; must propagate
+					// unchanged. net/http's own recover matches this with
+					// exact equality (not errors.Is), so a wrapped value
+					// wouldn't be recognized as the sentinel further up the
+					// stack anyway — matching that exact-equality semantics
+					// here keeps both layers in sync instead of this
+					// middleware treating more values as "silent abort"
+					// than net/http itself does.
+					panic(rec)
+				}
+				logger.Error("panic in handler %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack())
+				if hw.hijacked || hw.wroteHeader {
+					// Either connection ownership already moved to the raw
+					// handler (e.g. a WebSocket upgrade), or the response
+					// already started (headers/body written) — in both
+					// cases writing our own error response here would
+					// corrupt the stream rather than replace it. Re-panic
+					// as ErrAbortHandler (we already logged above, and
+					// net/http's own per-connection recover skips logging
+					// only for that exact sentinel) so net/http aborts the
+					// connection instead of us attempting a second write.
+					panic(http.ErrAbortHandler)
+				}
+				// Nothing was written yet, so a clean error response is
+				// safe. Close the connection afterwards rather than
+				// reusing it for keep-alive, out of caution.
+				hw.Header().Set("Connection", "close")
+				http.Error(hw, "internal server error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(hw, r)
 	})
 }
 
@@ -557,7 +658,7 @@ func main() {
 	// WebSocket
 	mux.HandleFunc("/ws", signaling.HandleWebSocket)
 
-	handler := securityHeaders(rateLimitMiddleware(mux))
+	handler := recoverMiddleware(securityHeaders(rateLimitMiddleware(mux)))
 
 	server := &http.Server{
 		Addr:              cfg.Server.Addr,
