@@ -117,6 +117,14 @@ func (l *ipLimiter) cleanup() {
 
 var limiter = newIPLimiter()
 
+// wsLimiter gates the /ws upgrade separately from the rest of the site.
+// A page load's static assets + API calls share `limiter`'s per-IP bucket;
+// without a dedicated bucket, that traffic (or a reconnect storm across
+// many participants) can exhaust the shared burst before the WS upgrade
+// request itself is even sent, causing spurious "too many requests" on the
+// one endpoint that must not be starved by unrelated activity.
+var wsLimiter = newIPLimiter()
+
 func clientIP(r *http.Request) string {
 	// Only trust X-Forwarded-For when behind reverse proxy (RemoteAddr is loopback)
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
@@ -134,8 +142,25 @@ func clientIP(r *http.Request) string {
 
 func rateLimitMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// /ws has its own dedicated limiter (wsRateLimitMiddleware) so it
+		// isn't starved by unrelated page/API traffic on the same IP.
+		if r.URL.Path == "/ws" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		ip := clientIP(r)
 		if !limiter.get(ip).Allow() {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func wsRateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		if !wsLimiter.get(ip).Allow() {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}
@@ -555,7 +580,7 @@ func main() {
 	mux.HandleFunc("/admin/users/reset-password", requireAdmin(csrfProtect(handleAdminResetPassword)))
 
 	// WebSocket
-	mux.HandleFunc("/ws", signaling.HandleWebSocket)
+	mux.Handle("/ws", wsRateLimitMiddleware(http.HandlerFunc(signaling.HandleWebSocket)))
 
 	handler := securityHeaders(rateLimitMiddleware(mux))
 
