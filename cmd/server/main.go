@@ -137,6 +137,12 @@ func clientIP(r *http.Request) string {
 			return strings.TrimSpace(fwd)
 		}
 	}
+	// RemoteAddr is "ip:port"; strip the port so the limiter keys on the
+	// client's IP, not a fresh ephemeral port on every connection (which
+	// would give every connection its own effectively-unlimited bucket).
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
 	return r.RemoteAddr
 }
 
