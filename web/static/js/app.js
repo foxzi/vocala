@@ -208,6 +208,11 @@ let userVolumes = {};
 // Camera state
 let cameraStream = null;
 let cameraSender = null;
+// Remote video tracks cached by SFU stream id ("camera-<uid>" / "screen-<uid>").
+// Video transceivers are persistent: a publisher toggling camera/screen uses
+// replaceTrack and never renegotiates, so ontrack fires once per source and
+// the tile is shown/hidden from this cache instead.
+let remoteVideoTracks = {};
 let cameraAdaptiveCleanup = null;
 let isCameraOn = localStorage.getItem('vocala-camera') === 'true';
 
@@ -342,27 +347,10 @@ function handleWSMessage(msg) {
             }
             break;
         case 'camera_on':
-            {
-                const stale = document.getElementById('remote-cam-camera-' + msg.user_id);
-                if (stale) {
-                    const v = stale.querySelector('video');
-                    if (v) { try { v.pause(); } catch (_) {} v.srcObject = null; }
-                    stale.remove();
-                    updateGridColumns();
-                }
-            }
-            // Someone turned on camera — check if we see it after delay
-            setTimeout(() => {
-                const el = document.getElementById('remote-cam-camera-' + msg.user_id);
-                if (!el && peerConnection && peerConnection.signalingState === 'stable') {
-                    console.log('Camera from user', msg.user_id, 'not received, requesting renegotiation');
-                    peerConnection.createOffer().then(offer => {
-                        return peerConnection.setLocalDescription(offer);
-                    }).then(() => {
-                        sendWS({ type: 'webrtc_offer', payload: { sdp: peerConnection.localDescription.sdp } });
-                    }).catch(e => console.error('Renegotiation request failed:', e));
-                }
-            }, 3000);
+            // Publisher re-enabled an existing track (replaceTrack, no
+            // renegotiation). Re-show from cache if frames already flow;
+            // otherwise the track's onunmute shows it on the first packet.
+            showRemoteVideoTileIfLive('camera-' + msg.user_id);
             break;
         case 'camera_off':
             {
@@ -461,6 +449,9 @@ function handleWSMessage(msg) {
             latestScreenPreview = null;
             screenShareUsername = null;
             removeRemoteVideo();
+            break;
+        case 'screen_on':
+            showRemoteVideoTileIfLive('screen-' + msg.user_id);
             break;
         case 'screen_off':
             {
@@ -1492,12 +1483,8 @@ async function startWebRTC() {
                 const stream = event.streams[0] || new MediaStream([event.track]);
                 const streamId = stream.id || '';
 
-                if (streamId.startsWith('camera')) {
-                    // Remote camera — add to camera grid
-                    handleRemoteCameraTrack(stream, event.track);
-                } else if (streamId.startsWith('screen')) {
-                    // Screen share — showRemoteVideo handles dedup by stream.id
-                    showRemoteVideo(stream, event.track);
+                if (streamId.startsWith('camera') || streamId.startsWith('screen')) {
+                    attachRemoteVideoTrack(stream, event.track);
                 } else {
                     console.warn('Ignoring video track with unrecognized streamId:', streamId);
                 }
@@ -1605,10 +1592,8 @@ async function startWebRTC() {
                 } else if (event.track.kind === 'video') {
                     const stream = event.streams[0] || new MediaStream([event.track]);
                     const streamId = stream.id || '';
-                    if (streamId.startsWith('camera')) {
-                        handleRemoteCameraTrack(stream, event.track);
-                    } else if (streamId.startsWith('screen')) {
-                        showRemoteVideo(stream, event.track);
+                    if (streamId.startsWith('camera') || streamId.startsWith('screen')) {
+                        attachRemoteVideoTrack(stream, event.track);
                     } else {
                         console.warn('Ignoring video track with unrecognized streamId:', streamId);
                     }
@@ -1801,14 +1786,18 @@ async function startScreenShare() {
         hideResumeScreenBanner();
 
         const videoTrack = screenStream.getVideoTracks()[0];
-        // Tell the SFU that the next video track is a screen, not a camera —
-        // classification is flag-based on the server and the camera flag may
-        // already be set from an earlier session restored from localStorage.
         sendWS({ type: 'screen_on' });
-        // Per-track msid->kind mapping: unambiguous even when camera and
-        // screen are added in the same renegotiation.
-        sendWS({ type: 'media_track', payload: { stream_id: screenStream.id, kind: 'screen' } });
-        screenSender = peerConnection.addTrack(videoTrack, screenStream);
+        if (screenSender) {
+            // Persistent transceiver from an earlier share in this session:
+            // swap the track in place. Same SSRC, no renegotiation, and the
+            // SFU keeps forwarding on the already-classified track.
+            await screenSender.replaceTrack(videoTrack);
+        } else {
+            // First share: negotiate the transceiver once. media_track maps
+            // the msid to its kind so the SFU classifies it unambiguously.
+            sendWS({ type: 'media_track', payload: { stream_id: screenStream.id, kind: 'screen' } });
+            screenSender = peerConnection.addTrack(videoTrack, screenStream);
+        }
         screenAdaptiveCleanup = startAdaptiveBitrate(screenSender, SCREEN_BITRATE_TIERS_BPS, 'screen');
         isScreenSharing = true;
 
@@ -1837,19 +1826,20 @@ async function stopScreenShare() {
     screenPreviewInterval = null;
 
     if (screenAdaptiveCleanup) { screenAdaptiveCleanup(); screenAdaptiveCleanup = null; }
+    // Detach the track but keep the sender/transceiver alive so the next
+    // share is a replaceTrack instead of a renegotiation. Subscribers hide
+    // the tile on the screen_off signal below.
     if (screenSender && peerConnection) {
-        peerConnection.removeTrack(screenSender);
+        await screenSender.replaceTrack(null).catch(e => console.warn('screen replaceTrack(null) failed:', e));
     }
     sendWS({ type: 'screen_off' });
     if (screenStream) {
         screenStream.getTracks().forEach(t => t.stop());
         screenStream = null;
     }
-    screenSender = null;
     isScreenSharing = false;
     localStorage.setItem('vocala-screen', 'false');
 
-    // onnegotiationneeded will handle renegotiation after removeTrack
     removeLocalScreenPreview();
     updateScreenShareUI();
 }
@@ -1983,6 +1973,61 @@ function showLocalScreenPreview(stream) {
 
 function removeLocalScreenPreview() {
     removeScreenTileFromGrid('local-screen-share');
+}
+
+// attachRemoteVideoTrack caches a remote camera/screen track and shows its
+// tile only while frames are actually flowing. A remote track starts muted
+// and unmutes on the first RTP packet, so a tile can never be shown black:
+// a publisher whose camera is currently off still has a live (idle) track,
+// but it stays muted and no tile is created until they turn it back on.
+function attachRemoteVideoTrack(stream, track) {
+    remoteVideoTracks[stream.id] = { stream, track };
+    const show = () => showRemoteVideoTile(stream.id);
+    if (!track.muted) show();
+
+    // Safety net for a lost camera_off/screen_off: a track that stays muted
+    // for 5s has no frames, so drop the tile rather than leave it frozen.
+    // The delay keeps short network hiccups from flickering the tile.
+    let muteTimer = null;
+    track.onmute = () => {
+        clearTimeout(muteTimer);
+        muteTimer = setTimeout(() => {
+            muteTimer = null;
+            if (remoteVideoTracks[stream.id]?.track === track) hideRemoteVideoTile(stream.id);
+        }, 5000);
+    };
+    track.onunmute = () => {
+        if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
+        show();
+    };
+}
+
+function hideRemoteVideoTile(streamId) {
+    if (streamId.startsWith('camera')) {
+        const camId = 'remote-cam-' + streamId;
+        if (document.getElementById(camId)) removeFromCameraGrid(camId);
+    } else {
+        const id = 'remote-screen-share-' + streamId;
+        if (document.getElementById(id)) removeScreenTileFromGrid(id);
+    }
+}
+
+function showRemoteVideoTile(streamId) {
+    const entry = remoteVideoTracks[streamId];
+    if (!entry) return;
+    if (streamId.startsWith('camera')) {
+        handleRemoteCameraTrack(entry.stream, entry.track);
+    } else {
+        showRemoteVideo(entry.stream, entry.track);
+    }
+}
+
+// showRemoteVideoTileIfLive re-shows a cached tile after a camera_on/screen_on
+// signal. Covers the fast off->on toggle where the track never went muted, so
+// no unmute event will fire; if it is still muted, onunmute takes over.
+function showRemoteVideoTileIfLive(streamId) {
+    const entry = remoteVideoTracks[streamId];
+    if (entry && !entry.track.muted) showRemoteVideoTile(streamId);
 }
 
 function showRemoteVideo(stream, track) {
@@ -2466,11 +2511,17 @@ async function startCamera() {
 
         const videoTrack = cameraStream.getVideoTracks()[0];
 
-        // Tell SFU next video track is camera, then add track
-        // SFU will initiate renegotiation — do NOT create offer from client
         sendWS({ type: 'camera_on' });
-        sendWS({ type: 'media_track', payload: { stream_id: cameraStream.id, kind: 'camera' } });
-        cameraSender = peerConnection.addTrack(videoTrack, cameraStream);
+        if (cameraSender) {
+            // Persistent transceiver: swap the track in place. Same SSRC, no
+            // renegotiation on either side, SFU keeps forwarding.
+            await cameraSender.replaceTrack(videoTrack);
+        } else {
+            // First enable: negotiate the transceiver once (SFU initiates the
+            // renegotiation after media_track classifies the msid).
+            sendWS({ type: 'media_track', payload: { stream_id: cameraStream.id, kind: 'camera' } });
+            cameraSender = peerConnection.addTrack(videoTrack, cameraStream);
+        }
         cameraAdaptiveCleanup = startAdaptiveBitrate(cameraSender, CAMERA_BITRATE_TIERS_BPS, 'camera');
 
         isCameraOn = true;
@@ -2480,7 +2531,6 @@ async function startCamera() {
         videoTrack.onended = () => stopCamera();
     } catch (err) {
         console.error('Failed to start camera:', err);
-        // Make sure expectCamera flag is cleared on server
         sendWS({ type: 'camera_off' });
     }
 }
@@ -2492,9 +2542,10 @@ function stopCamera() {
         cameraStream = null;
     }
     sendWS({ type: 'camera_off' });
+    // Keep the sender alive so the next enable is a replaceTrack, not a
+    // renegotiation. Subscribers hide the tile on camera_off.
     if (cameraSender && peerConnection) {
-        peerConnection.removeTrack(cameraSender);
-        cameraSender = null;
+        cameraSender.replaceTrack(null).catch(e => console.warn('camera replaceTrack(null) failed:', e));
     }
     isCameraOn = false;
     updateCameraUI();
@@ -2716,19 +2767,8 @@ function handleRemoteCameraTrack(stream, track) {
     track.onended = () => {
         if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
     };
-
-    let muteTimer = null;
-    track.onmute = () => {
-        if (document.getElementById(camId)?.dataset.trackId === track.id) {
-            clearTimeout(muteTimer);
-            muteTimer = setTimeout(() => {
-                if (document.getElementById(camId)?.dataset.trackId === track.id) removeFromCameraGrid(camId);
-            }, 5000);
-        }
-    };
-    track.onunmute = () => {
-        if (muteTimer) { clearTimeout(muteTimer); muteTimer = null; }
-    };
+    // mute/unmute handling lives in attachRemoteVideoTrack, which owns the
+    // track for its whole lifetime (persistent transceiver, replaceTrack).
 }
 
 let expandedCamId = null;
@@ -2968,6 +3008,7 @@ function cleanupWebRTC() {
     cameraSender = null;
     isCameraOn = false;
     remoteCameras = {};
+    remoteVideoTracks = {};
     const cameraGrid = document.getElementById('camera-grid');
     if (cameraGrid) cameraGrid.remove();
     if (peerConnection) {
