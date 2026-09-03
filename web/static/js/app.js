@@ -3627,7 +3627,7 @@ function renderDMList(items) {
             </div>
         `;
         row.querySelector('.dm-name').textContent = d.other_name;
-        row.addEventListener('click', () => openDMChannel(d.channel_id, d.other_name));
+        row.addEventListener('click', () => openDMChannel(d.channel_id, d.other_name, d.other_user_id));
         root.appendChild(row);
     });
     updateCallIndicators();
@@ -3724,28 +3724,9 @@ function updateActiveHuddleBadges() {
         }
     });
     if (isCurrentChannelDM && !isDMHuddleActive && currentChannelID) {
-        const huddleBtn = document.querySelector('#main-content [data-dm-huddle-btn]');
         const banner = document.getElementById('active-huddle-banner');
         const active = dmHasActiveHuddle(currentChannelID);
         if (active) {
-            if (huddleBtn && !huddleBtn.dataset.rejoinWired) {
-                huddleBtn.dataset.rejoinWired = '1';
-                huddleBtn.dataset.originalOnclick = huddleBtn.getAttribute('onclick') || '';
-                huddleBtn.removeAttribute('onclick');
-                huddleBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    const dmRow = document.querySelector(`#dm-list [data-dm-channel="${currentChannelID}"]`);
-                    const name = dmRow ? (dmRow.querySelector('.dm-name')?.textContent || '') : '';
-                    rejoinActiveHuddle(currentChannelID, name);
-                };
-            }
-            if (huddleBtn) {
-                huddleBtn.classList.add('bg-vc-green', 'hover:bg-vc-green/80');
-                huddleBtn.classList.remove('bg-vc-accent', 'hover:bg-vc-accent/80');
-                const label = huddleBtn.querySelector('span');
-                if (label) label.textContent = 'Rejoin huddle';
-                huddleBtn.title = 'Rejoin the active huddle';
-            }
             if (!banner) {
                 const header = document.querySelector('#main-content > div > div:first-child');
                 if (header) {
@@ -3769,19 +3750,6 @@ function updateActiveHuddleBadges() {
                 }
             }
         } else {
-            if (huddleBtn && huddleBtn.dataset.rejoinWired) {
-                delete huddleBtn.dataset.rejoinWired;
-                const orig = huddleBtn.dataset.originalOnclick;
-                if (orig) huddleBtn.setAttribute('onclick', orig);
-                huddleBtn.onclick = null;
-            }
-            if (huddleBtn) {
-                huddleBtn.classList.remove('bg-vc-green', 'hover:bg-vc-green/80');
-                huddleBtn.classList.add('bg-vc-accent', 'hover:bg-vc-accent/80');
-                const label = huddleBtn.querySelector('span');
-                if (label) label.textContent = 'Huddle';
-                huddleBtn.title = 'Start huddle';
-            }
             if (banner) banner.remove();
         }
     }
@@ -3901,10 +3869,22 @@ function updateGlobalUnreadFavicon() {
     document.title = total > 0 ? `(${total > 99 ? '99+' : total}) ${base}` : base;
 }
 
-function openDMChannel(channelId, otherName) {
+function openDMChannel(channelId, otherName, otherUserId) {
     dmChannelIds.add(channelId);
     clearDMUnread(channelId);
-    joinChannel(channelId, otherName, { isDM: true });
+    // Peek chat-only when already in another call so we don't drop it.
+    if (activeCallChannelID && activeCallChannelID !== channelId) {
+        joinChannel(channelId, otherName, { isDM: true });
+        return;
+    }
+    // Otherwise enter the call directly: join an ongoing huddle, or start one.
+    if (dmHasActiveHuddle(channelId)) {
+        joinChannelHuddle(channelId, otherName);
+    } else if (otherUserId) {
+        startDMHuddle(channelId, otherUserId, otherName);
+    } else {
+        joinChannel(channelId, otherName, { isDM: true });
+    }
 }
 
 function renderDMChatOnly(channelID, displayName) {
@@ -3915,21 +3895,7 @@ function renderChannelChatOnly(channelID, displayName, opts) {
     const mainContent = document.getElementById('main-content');
     if (!mainContent) return;
     const isDM = !!opts?.isDM;
-    let otherUserId = 0;
-    if (isDM) {
-        const dmRow = document.querySelector(`#dm-list [data-dm-channel="${channelID}"]`);
-        if (dmRow) otherUserId = parseInt(dmRow.dataset.otherId, 10) || 0;
-    }
     const safeName = escapeHTML(displayName || (isDM ? 'Direct message' : 'Channel'));
-    const huddleBtn = isDM && otherUserId
-        ? `<button data-dm-huddle-btn onclick="startDMHuddle(${channelID}, ${otherUserId}, '${safeName.replace(/'/g, "\\'")}')" class="flex items-center gap-1.5 px-3 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-xs md:text-sm rounded-lg transition" title="Start huddle">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/></svg>
-            <span>Huddle</span>
-        </button>`
-        : `<button data-dm-huddle-btn onclick="joinChannelHuddle(${channelID}, '${safeName.replace(/'/g, "\\'")}')" class="flex items-center gap-1.5 px-3 py-1.5 bg-vc-accent hover:bg-vc-accent/80 text-white text-xs md:text-sm rounded-lg transition" title="Join huddle">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.95.68l1.5 4.49a1 1 0 01-.5 1.21l-2.26 1.13a11 11 0 005.52 5.52l1.13-2.26a1 1 0 011.21-.5l4.49 1.5a1 1 0 01.68.95V19a2 2 0 01-2 2h-1C9.72 21 3 14.28 3 6V5z"/></svg>
-            <span>Join huddle</span>
-        </button>`;
     const avatar = isDM
         ? `<img src="${avatarURL(displayName || 'dm')}" class="w-8 h-8 rounded-full flex-shrink-0">`
         : `<svg class="w-6 h-6 text-vc-accent flex-shrink-0" fill="currentColor" viewBox="0 0 24 24"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>`;
@@ -3945,7 +3911,6 @@ function renderChannelChatOnly(channelID, displayName, opts) {
                 ${avatar}
                 <h2 class="text-base md:text-xl font-bold truncate flex-1">${safeName}</h2>
                 ${returnPill}
-                ${huddleBtn}
                 <button onclick="leaveChannel()" class="px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-muted hover:text-vc-text text-xs md:text-sm rounded-lg transition" title="Close">
                     Close
                 </button>
