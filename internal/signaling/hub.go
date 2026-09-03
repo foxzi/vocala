@@ -27,6 +27,10 @@ func SetMaxMessageSize(size int64) {
 }
 
 const (
+	// sessionReplacedCloseCode tells a browser that another window for the
+	// same account took ownership of the session. Application close codes
+	// may use the 4000-4999 range.
+	sessionReplacedCloseCode = 4001
 	// pongWait — how long we wait for a pong from the client before
 	// considering the connection dead. Must be > pingPeriod.
 	pongWait = 60 * time.Second
@@ -160,17 +164,30 @@ func huddleInviteAllowed(from, to int64) bool {
 	return true
 }
 
-func (h *Hub) Register(client *Client) {
+func (h *Hub) Register(client *Client) bool {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	// Close previous connection for the same user (#8)
-	if old, ok := h.clients[client.UserID]; ok && old != client {
-		old.Conn.Close()
-	}
+	old := h.clients[client.UserID]
 	h.clients[client.UserID] = client
+	h.mu.Unlock()
+
+	if old == nil || old == client {
+		return false
+	}
+
+	// Tell the displaced browser not to reconnect. Without an explicit close
+	// code, two tabs continually reconnect and evict each other.
+	if old.Conn != nil {
+		_ = old.Conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(sessionReplacedCloseCode, "session opened in another window"),
+			time.Now().Add(writeWait),
+		)
+		_ = old.Conn.Close()
+	}
+	return true
 }
 
-func (h *Hub) Unregister(client *Client) {
+func (h *Hub) Unregister(client *Client) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -179,7 +196,9 @@ func (h *Hub) Unregister(client *Client) {
 	if current, ok := h.clients[client.UserID]; ok && current == client {
 		delete(h.clients, client.UserID)
 		removeUserFromAllWatchers(client.UserID)
+		return true
 	}
+	return false
 }
 
 func (h *Hub) Broadcast(msg []byte) {
@@ -381,7 +400,18 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	GlobalHub.Register(client)
+	replaced := GlobalHub.Register(client)
+	if replaced {
+		// The new connection owns this user now. Tear down the displaced
+		// window call before its replacement starts reading messages.
+		removeUserFromAllWatchers(client.UserID)
+		if chID := channel.Leave(client.UserID); chID > 0 {
+			cleanupWebRTC(chID, client.UserID)
+			clearPreviewIfSharer(chID, client.UserID)
+			broadcastChannelUpdate(chID)
+			broadcastPresence()
+		}
+	}
 
 	// Send current presence to new client
 	states := channel.GetAllChannelStates()
@@ -439,9 +469,14 @@ func (c *Client) writePump() {
 
 func (c *Client) readPump() {
 	defer func() {
-		chID := channel.Leave(c.UserID)
-		GlobalHub.Unregister(c)
+		isCurrent := GlobalHub.Unregister(c)
 		c.Conn.Close()
+		// A replacement connection has already taken ownership and performed
+		// cleanup. The displaced read pump must not remove the new session.
+		if !isCurrent {
+			return
+		}
+		chID := channel.Leave(c.UserID)
 		if chID > 0 {
 			cleanupWebRTC(chID, c.UserID)
 			clearPreviewIfSharer(chID, c.UserID)

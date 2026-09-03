@@ -13,6 +13,7 @@ let reconnectAttempts = 0;
 let wsLastOpenAt = 0;
 let wsRapidBounceCount = 0;
 let wsBouncedOut = false;
+const WS_CLOSE_SESSION_REPLACED = 4001;
 
 // XSS-safe HTML escaping
 const SPEAKING_LABELS = ['bzzz', 'oooo', 'aaaa', 'yoho', 'wooo', 'hehe', 'mhm', 'pew', 'rawr', 'meow', 'woof', 'yay', 'huh', 'ohno', 'blah', 'nani', 'eeek', 'gulp', 'zzz', 'bam', 'pow', 'boop', 'nom', 'uwu', 'aha', 'hmm', 'eep', 'oof', 'yip', 'arr'];
@@ -278,6 +279,14 @@ function connectWS() {
 
     ws.onclose = (e) => {
         console.warn('WS closed: code=' + e.code + ' reason=' + (e.reason || '(none)') + ' wasClean=' + e.wasClean);
+        if (e.code === WS_CLOSE_SESSION_REPLACED) {
+            wsBouncedOut = true;
+            reconnectAttempts = 0;
+            cleanupWebRTC();
+            setConnectionStatus('disconnected');
+            showDoubleLoginBanner();
+            return;
+        }
         if (wsLastOpenAt > 0 && Date.now() - wsLastOpenAt < 2000) {
             wsRapidBounceCount++;
         } else {
@@ -494,6 +503,9 @@ function setConnectionStatus(state) {
         } else if (state === 'reconnecting') {
             el.textContent = 'Reconnecting...';
             el.className = 'text-xs text-vc-yellow';
+        } else if (state === 'disconnected') {
+            el.textContent = 'Disconnected';
+            el.className = 'text-xs text-vc-red';
         }
     }
     if (rtcEl) updateRTCStatus();
