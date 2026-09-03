@@ -900,6 +900,28 @@ func logSelectedCandidatePair(pc *webrtc.PeerConnection, userID int64) {
 	logger.Debug("webrtc: peer %d no nominated ICE pair found in stats", userID)
 }
 
+// RequestKeyframe sends a PLI to the publisher's existing camera or screen
+// track. Used when a client re-enables video via replaceTrack on a persistent
+// transceiver: no new track arrives, so a keyframe is requested explicitly
+// to let subscribers decode immediately instead of waiting for the next
+// periodic PLI. No-op if the track has not been negotiated yet.
+func (s *SFU) RequestKeyframe(userID int64, kind string) {
+	s.mu.RLock()
+	peer, ok := s.peers[userID]
+	var track *webrtc.TrackRemote
+	if ok {
+		if kind == "screen" {
+			track = peer.screenTrack
+		} else {
+			track = peer.cameraTrack
+		}
+	}
+	s.mu.RUnlock()
+	if track != nil {
+		s.sendPLI(peer, track)
+	}
+}
+
 func (s *SFU) sendPLI(peer *Peer, track *webrtc.TrackRemote) {
 	if peer.PC.ConnectionState() == webrtc.PeerConnectionStateClosed {
 		return

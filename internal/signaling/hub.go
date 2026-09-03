@@ -747,11 +747,11 @@ func handleMessage(c *Client, msg Message) {
 		sfu := rtc.GetSFU(chID)
 		if sfu != nil {
 			sfu.SetExpectCamera(c.UserID, true)
+			sfu.RequestKeyframe(c.UserID, "camera")
 			logger.Info("signaling: user %d expectCamera=true", c.UserID)
 		}
 		// Notify other clients (not the sender: their own client has no
-		// remote tile for itself, so self-delivery only serves to trigger
-		// a spurious "camera not received" renegotiation retry)
+		// remote tile for itself)
 		camOnMsg, _ := json.Marshal(map[string]any{
 			"type":    "camera_on",
 			"user_id": c.UserID,
@@ -783,6 +783,7 @@ func handleMessage(c *Client, msg Message) {
 		sfu := rtc.GetSFU(chID)
 		if sfu != nil {
 			sfu.SetExpectScreen(c.UserID, true)
+			sfu.RequestKeyframe(c.UserID, "screen")
 			logger.Info("signaling: user %d expectScreen=true", c.UserID)
 		}
 		screenOnMsg, _ := json.Marshal(map[string]any{
