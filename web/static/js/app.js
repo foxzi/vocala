@@ -709,13 +709,16 @@ function closeSidebarOnMobile() {
     }
 }
 
-// ─── Channel Preview & Join ───────────────────────────────────
+// ─── Channel Join ─────────────────────────────────────────────
 
 let previewChannelID = null;
 
-function previewChannel(channelID, channelName, isPrivate) {
-    if (currentChannelID === channelID) return;
-    joinChannel(channelID, channelName, { chatOnly: true });
+function openVoiceChannel(channelID, channelName) {
+    // A regular channel click always enters its call. forceHuddle handles the
+    // case where this channel was restored as a chat-only view after reload.
+    joinChannel(channelID, channelName, {
+        forceHuddle: chatOnlyChannelID === channelID,
+    });
 }
 
 let chatOnlyChannelID = null;
