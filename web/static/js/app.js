@@ -225,25 +225,10 @@ function connectWS() {
         if (dbg) dbg.textContent = 'WS connected, joining channel ' + (window.VOCALA_GUEST_CHANNEL || 'none');
 
         if (currentChannelID) {
-            const chID = currentChannelID;
-            const pcAlive = peerConnection &&
-                peerConnection.connectionState !== 'failed' &&
-                peerConnection.connectionState !== 'closed' &&
-                peerConnection.connectionState !== 'disconnected';
-            if (pcAlive) {
-                // PC survived the WS blip — just re-announce presence on the server.
-                sendWS({ type: 'join_channel', payload: { channel_id: chID } });
-            } else {
-                const wasCameraOn = isCameraOn;
-                const wasScreenSharing = isScreenSharing;
-                cleanupWebRTC();
-                currentChannelID = chID;
-                sendWS({ type: 'join_channel', payload: { channel_id: chID } });
-                startWebRTC().then(() => {
-                    if (wasCameraOn) startCamera();
-                    if (wasScreenSharing) showScreenShareResumePrompt();
-                });
-            }
+            // The server drops our SFU peer whenever the WS goes away, so a
+            // PeerConnection that still looks alive here is dead on the other
+            // end. Always rebuild it, otherwise nobody hears us until reload.
+            rebuildWebRTC(true);
         } else if (window.VOCALA_GUEST_CHANNEL) {
             // Guest auto-join their assigned channel
             try {
@@ -1346,6 +1331,29 @@ async function _restartMic() {
     }
 }
 
+// attachRemoteAudio plays a remote audio track. The SFU keeps the stream id
+// "audio-<uid>" across a user's reconnects, so an existing element is rebound
+// to the new track instead of being kept on the old, ended one.
+function attachRemoteAudio(event) {
+    const stream = event.streams[0] || new MediaStream([event.track]);
+    const audioStreamId = stream.id || '';
+    let audio = document.querySelector(`audio[data-stream-id="${audioStreamId}"]`);
+    if (!audio) {
+        audio = new Audio();
+        audio.autoplay = true;
+        if (selectedSpkId && audio.setSinkId) {
+            audio.setSinkId(selectedSpkId).catch(() => {});
+        }
+        const uid = audioStreamId.replace('audio-', '');
+        audio.dataset.streamId = audioStreamId;
+        audio.dataset.uid = uid;
+        if (localMutedUsers.has(uid)) audio.muted = true;
+        document.body.appendChild(audio);
+    }
+    audio.srcObject = new MediaStream([event.track]);
+    audio.play().catch(() => {});
+}
+
 async function startWebRTC() {
     try {
         localStream = await navigator.mediaDevices.getUserMedia({
@@ -1397,20 +1405,7 @@ async function startWebRTC() {
         // Handle remote tracks
         peerConnection.ontrack = (event) => {
             if (event.track.kind === 'audio') {
-                const audioStreamId = event.streams[0]?.id || '';
-                if (document.querySelector(`audio[data-stream-id="${audioStreamId}"]`)) return;
-                const audio = new Audio();
-                audio.srcObject = event.streams[0];
-                audio.autoplay = true;
-                if (selectedSpkId && audio.setSinkId) {
-                    audio.setSinkId(selectedSpkId).catch(() => {});
-                }
-                const uid = audioStreamId.replace('audio-', '');
-                audio.dataset.streamId = audioStreamId;
-                audio.dataset.uid = uid;
-                if (localMutedUsers.has(uid)) audio.muted = true;
-                document.body.appendChild(audio);
-                audio.play().catch(() => {});
+                attachRemoteAudio(event);
             } else if (event.track.kind === 'video') {
                 const stream = event.streams[0] || new MediaStream([event.track]);
                 const streamId = stream.id || '';
@@ -1462,6 +1457,11 @@ async function startWebRTC() {
         // Connection state
         peerConnection.onconnectionstatechange = () => {
             updateRTCStatus();
+            // ICE restart could not save the connection: start a new one.
+            if (peerConnection?.connectionState === 'failed' && ws?.readyState === WebSocket.OPEN) {
+                console.warn('[vocala-diag] PeerConnection failed — rebuilding');
+                rebuildWebRTC(false);
+            }
         };
 
         peerConnection.oniceconnectionstatechange = () => {
@@ -1483,7 +1483,7 @@ async function startWebRTC() {
 
         sendWS({
             type: 'webrtc_offer',
-            payload: { sdp: offer.sdp },
+            payload: { sdp: offer.sdp, reset: true },
         });
 
         // Restore saved state
@@ -1507,20 +1507,7 @@ async function startWebRTC() {
 
             peerConnection.ontrack = (event) => {
                 if (event.track.kind === 'audio') {
-                    const audioStreamId = event.streams[0]?.id || '';
-                    if (document.querySelector(`audio[data-stream-id="${audioStreamId}"]`)) return;
-                    const audio = new Audio();
-                    audio.srcObject = event.streams[0];
-                    audio.autoplay = true;
-                    if (selectedSpkId && audio.setSinkId) {
-                        audio.setSinkId(selectedSpkId).catch(() => {});
-                    }
-                    const uid = audioStreamId.replace('audio-', '');
-                    audio.dataset.streamId = audioStreamId;
-                    audio.dataset.uid = uid;
-                    if (localMutedUsers.has(uid)) audio.muted = true;
-                    document.body.appendChild(audio);
-                    audio.play().catch(() => {});
+                    attachRemoteAudio(event);
                 } else if (event.track.kind === 'video') {
                     const stream = event.streams[0] || new MediaStream([event.track]);
                     const streamId = stream.id || '';
@@ -1540,7 +1527,7 @@ async function startWebRTC() {
 
             const offer = await peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
-            sendWS({ type: 'webrtc_offer', payload: { sdp: offer.sdp } });
+            sendWS({ type: 'webrtc_offer', payload: { sdp: offer.sdp, reset: true } });
             updateRTCStatusText('connected', 'Listen-only (no mic) — tap mic to enable');
         } catch (err2) {
             console.error('Receive-only WebRTC also failed:', err2);
@@ -2876,6 +2863,28 @@ function captureAndSendPreview() {
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
     sendWS({ type: 'screen_preview', payload: { image: dataUrl } });
+}
+
+// rebuildWebRTC replaces the PeerConnection with a fresh one while staying in
+// the current channel. rejoin re-announces the channel after a WS reconnect.
+let rebuildingWebRTC = false;
+function rebuildWebRTC(rejoin) {
+    const chID = currentChannelID;
+    if (!chID || rebuildingWebRTC) return;
+    rebuildingWebRTC = true;
+    const wasCameraOn = isCameraOn;
+    const wasScreenSharing = isScreenSharing;
+    const callID = activeCallChannelID;
+    const callName = activeCallChannelName;
+    cleanupWebRTC();
+    currentChannelID = chID;
+    activeCallChannelID = callID;
+    activeCallChannelName = callName;
+    if (rejoin) sendWS({ type: 'join_channel', payload: { channel_id: chID } });
+    startWebRTC().then(() => {
+        if (wasCameraOn) startCamera();
+        if (wasScreenSharing) showScreenShareResumePrompt();
+    }).finally(() => { rebuildingWebRTC = false; });
 }
 
 function cleanupWebRTC() {

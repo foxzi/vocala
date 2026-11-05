@@ -765,7 +765,8 @@ func handleMessage(c *Client, msg Message) {
 
 	case "webrtc_offer":
 		var p struct {
-			SDP string `json:"sdp"`
+			SDP   string `json:"sdp"`
+			Reset bool   `json:"reset"` // first offer of a new client PeerConnection
 		}
 		if err := json.Unmarshal(msg.Payload, &p); err != nil {
 			logger.Warn("signaling: bad webrtc_offer from user %d: %v", c.UserID, err)
@@ -778,6 +779,11 @@ func handleMessage(c *Client, msg Message) {
 		sfu := rtc.GetOrCreateSFU(chID, func(userID int64, data []byte) {
 			GlobalHub.SendToPriority(userID, data)
 		})
+		if p.Reset {
+			// The old server peer belongs to a PeerConnection the client
+			// has thrown away; applying the new offer to it would fail.
+			sfu.RemovePeer(c.UserID)
+		}
 		if err := sfu.HandleOffer(c.UserID, c.Username, p.SDP); err != nil {
 			logger.Error("signaling: webrtc offer failed for user %d: %v", c.UserID, err)
 		}
