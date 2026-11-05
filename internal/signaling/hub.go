@@ -563,6 +563,8 @@ var guestForbidden = map[string]bool{
 	"huddle_invite_others": true,
 	"huddle_end":           true,
 	"screen_preview":       true,
+	"watch_channels":       true,
+	"peek_history":         true,
 }
 
 func handleMessage(c *Client, msg Message) {
@@ -710,6 +712,10 @@ func handleMessage(c *Client, msg Message) {
 			return
 		}
 		if !c.IsAdmin && !channel.CanManage(chID, c.UserID, false) {
+			return
+		}
+		// Target must be in the caller's channel, not anywhere else
+		if channel.GetUserChannel(p.UserID) != chID {
 			return
 		}
 		channel.SetMuted(p.UserID, true)
