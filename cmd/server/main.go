@@ -833,11 +833,16 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.SetCookie(w, sessionCookie(token, 86400*30))
-	next := r.FormValue("next")
-	if next == "" || !strings.HasPrefix(next, "/") {
-		next = "/"
+	http.Redirect(w, r, safeNext(r.FormValue("next")), http.StatusSeeOther)
+}
+
+// safeNext allows only local paths as a post-login redirect target.
+// "//host" and "/\host" are treated by browsers as another origin.
+func safeNext(next string) string {
+	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
+		return "/"
 	}
-	http.Redirect(w, r, next, http.StatusSeeOther)
+	return next
 }
 
 func handleRegister(w http.ResponseWriter, r *http.Request) {
@@ -1524,7 +1529,7 @@ func handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 
 	user := auth.UserFromRequest(r)
 	if user == nil {
-		http.Redirect(w, r, "/login?next="+r.URL.Path, http.StatusSeeOther)
+		http.Redirect(w, r, "/login?next="+url.QueryEscape(r.URL.Path), http.StatusSeeOther)
 		return
 	}
 
@@ -1540,7 +1545,7 @@ func handleInviteAccept(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.Redirect(w, r, "/channels/"+ch.Name, http.StatusSeeOther)
+	http.Redirect(w, r, "/channels/"+url.PathEscape(ch.Name), http.StatusSeeOther)
 }
 
 // --- Guest access ---

@@ -9,7 +9,7 @@ vocala.db-shm
 *.rpm
 /tmp/
 .DS_Store
-server
+/server
 vocala
 nginx/certs/
 .env
