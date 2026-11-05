@@ -79,24 +79,6 @@ func Create(name string, createdBy int64, isPrivate bool) (*Channel, error) {
 	return ch, nil
 }
 
-func List() ([]Channel, error) {
-	rows, err := database.DB.Query("SELECT id, name, created_by, is_private, is_ephemeral FROM channels WHERE is_dm = 0 ORDER BY name")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var channels []Channel
-	for rows.Next() {
-		var ch Channel
-		if err := rows.Scan(&ch.ID, &ch.Name, &ch.CreatedBy, &ch.IsPrivate, &ch.IsEphemeral); err != nil {
-			return nil, err
-		}
-		channels = append(channels, ch)
-	}
-	return channels, nil
-}
-
 // ListForUser returns channels visible to the given user.
 // Public channels are always included; private channels only if the user
 // is the creator, a member, or an admin.
@@ -536,26 +518,6 @@ func IsMember(channelID, userID int64) bool {
 	return count > 0
 }
 
-func GetMembers(channelID int64) ([]int64, error) {
-	rows, err := database.DB.Query(
-		"SELECT user_id FROM channel_members WHERE channel_id = ?", channelID,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var members []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			continue
-		}
-		members = append(members, id)
-	}
-	return members, nil
-}
-
 type Member struct {
 	UserID   int64
 	Username string
@@ -677,43 +639,6 @@ func AcceptInvite(token string, userID int64) (int64, error) {
 		return 0, err
 	}
 	return channelID, nil
-}
-
-// GetInvites returns active invites for a channel.
-func GetInvites(channelID int64) ([]map[string]any, error) {
-	now := time.Now().Unix()
-	rows, err := database.DB.Query(
-		`SELECT token, created_at, expires_at, max_uses, uses FROM channel_invites
-		 WHERE channel_id = ? AND expires_at > ? ORDER BY created_at DESC`,
-		channelID, now,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var invites []map[string]any
-	for rows.Next() {
-		var token string
-		var createdAt, expiresAt int64
-		var maxUses, uses int
-		if err := rows.Scan(&token, &createdAt, &expiresAt, &maxUses, &uses); err != nil {
-			continue
-		}
-		invites = append(invites, map[string]any{
-			"token":      token,
-			"created_at": createdAt,
-			"expires_at": expiresAt,
-			"max_uses":   maxUses,
-			"uses":       uses,
-		})
-	}
-	return invites, nil
-}
-
-func DeleteInvite(token string) error {
-	_, err := database.DB.Exec(`DELETE FROM channel_invites WHERE token = ?`, token)
-	return err
 }
 
 // --- Guest invites ---
