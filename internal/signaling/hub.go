@@ -214,6 +214,26 @@ func (h *Hub) Broadcast(msg []byte) {
 	}
 }
 
+// BroadcastVisible sends msg to members, and to guests only for their own
+// channel, so guests do not see who is in other channels.
+func (h *Hub) BroadcastVisible(msg []byte, guestMsg func(guestChannelID int64) []byte) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	for _, client := range h.clients {
+		m := msg
+		if client.IsGuest {
+			if m = guestMsg(client.GuestChannelID); m == nil {
+				continue
+			}
+		}
+		select {
+		case client.Send <- m:
+		default:
+		}
+	}
+}
+
 func (h *Hub) BroadcastToChannel(channelID int64, msg []byte) {
 	users := channel.GetUsers(channelID)
 	h.mu.RLock()
@@ -415,6 +435,9 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// Send current presence to new client
 	states := channel.GetAllChannelStates()
+	if client.IsGuest {
+		states = guestStates(states, client.GuestChannelID)
+	}
 	presenceData, _ := json.Marshal(map[string]any{
 		"type":     "presence",
 		"channels": states,
@@ -565,6 +588,7 @@ var guestForbidden = map[string]bool{
 	"screen_preview":       true,
 	"watch_channels":       true,
 	"peek_history":         true,
+	"huddle_decline":       true,
 }
 
 func handleMessage(c *Client, msg Message) {
@@ -1256,25 +1280,24 @@ func handleMessage(c *Client, msg Message) {
 			ChannelID  int64 `json:"channel_id"`
 			Missed     bool  `json:"missed"`
 		}
-		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.FromUserID == 0 {
+		if err := json.Unmarshal(msg.Payload, &p); err != nil || p.FromUserID == 0 || p.ChannelID == 0 {
 			return
 		}
 		// Only the actual recipient of a DM call may decline it; this prevents
-		// any authenticated user from forging "missed call" system messages.
-		if p.ChannelID > 0 {
-			ch, err := channel.GetByID(p.ChannelID)
-			if err != nil || !ch.IsDM {
-				return
-			}
-			if c.UserID != ch.DMUserA && c.UserID != ch.DMUserB {
-				return
-			}
-			if p.FromUserID != ch.DMUserA && p.FromUserID != ch.DMUserB {
-				return
-			}
-			if p.FromUserID == c.UserID {
-				return
-			}
+		// any authenticated user from forging "missed call" system messages
+		// or spamming decline notices to arbitrary users.
+		ch, err := channel.GetByID(p.ChannelID)
+		if err != nil || !ch.IsDM {
+			return
+		}
+		if c.UserID != ch.DMUserA && c.UserID != ch.DMUserB {
+			return
+		}
+		if p.FromUserID != ch.DMUserA && p.FromUserID != ch.DMUserB {
+			return
+		}
+		if p.FromUserID == c.UserID {
+			return
 		}
 		declineMsg, _ := json.Marshal(map[string]any{
 			"type":         "huddle_declined",
@@ -1287,7 +1310,7 @@ func handleMessage(c *Client, msg Message) {
 
 		// Only persist a system message for actually-missed calls; an explicit
 		// "Dismiss" by the recipient should not pollute chat history.
-		if p.ChannelID > 0 && p.Missed {
+		if p.Missed {
 			now := time.Now()
 			fromUser, _ := auth.GetUserByID(p.FromUserID)
 			fromUsername := "user"
@@ -1409,7 +1432,35 @@ func broadcastChannelUpdate(channelID int64) {
 		"channel_id": channelID,
 		"users":      users,
 	})
-	GlobalHub.Broadcast(data)
+	GlobalHub.BroadcastVisible(data, func(guestChannelID int64) []byte {
+		if guestChannelID != channelID {
+			return nil
+		}
+		return data
+	})
+}
+
+func broadcastPresence() {
+	states := channel.GetAllChannelStates()
+	data, _ := json.Marshal(map[string]any{
+		"type":     "presence",
+		"channels": states,
+	})
+	GlobalHub.BroadcastVisible(data, func(guestChannelID int64) []byte {
+		g, _ := json.Marshal(map[string]any{
+			"type":     "presence",
+			"channels": guestStates(states, guestChannelID),
+		})
+		return g
+	})
+}
+
+func guestStates(states map[int64][]*channel.ConnectedUser, guestChannelID int64) map[int64][]*channel.ConnectedUser {
+	out := map[int64][]*channel.ConnectedUser{}
+	if users, ok := states[guestChannelID]; ok {
+		out[guestChannelID] = users
+	}
+	return out
 }
 
 // KickFromChannel drops a user who lost access to a channel: ends their
@@ -1428,15 +1479,6 @@ func KickFromChannel(channelID, userID int64) {
 		"channel_id": channelID,
 	})
 	GlobalHub.SendToPriority(userID, msg)
-}
-
-func broadcastPresence() {
-	states := channel.GetAllChannelStates()
-	data, _ := json.Marshal(map[string]any{
-		"type":     "presence",
-		"channels": states,
-	})
-	GlobalHub.Broadcast(data)
 }
 
 // ClearChannelPreview removes the stored screen preview for a channel (e.g. when channel is deleted).
