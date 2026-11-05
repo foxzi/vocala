@@ -167,7 +167,6 @@ function avatarURL(username) {
 // WebRTC state
 let peerConnection = null;
 let localStream = null;
-let micReady = false;
 let pushToTalk = localStorage.getItem('vocala-ptt') === 'true';
 let pttActive = false;
 
@@ -189,9 +188,7 @@ let screenSender = null;
 let screenAdaptiveCleanup = null;
 let isScreenSharing = false;
 let screenPreviewInterval = null;
-let latestScreenPreview = null;
 let screenShareUsername = null;
-let userVolumes = {};
 
 // Camera state
 let cameraStream = null;
@@ -208,8 +205,6 @@ let isCameraOn = localStorage.getItem('vocala-camera') === 'true';
 // qualityLimitationReason==='bandwidth', step up after 15s clean.
 const CAMERA_BITRATE_TIERS_BPS = [1_200_000, 800_000, 500_000, 300_000, 150_000];
 const SCREEN_BITRATE_TIERS_BPS = [2_500_000, 1_500_000, 800_000, 400_000];
-let remoteCameras = {}; // userID -> { stream, username }
-let lastServerOfferTime = 0;
 
 // ─── WebSocket ────────────────────────────────────────────────
 
@@ -430,19 +425,9 @@ function handleWSMessage(msg) {
             removeChatReaction(msg);
             break;
         case 'screen_preview':
-            // Only accept data: URIs to prevent injection via url()
-            if (msg.payload.image && msg.payload.image.startsWith('data:image/')) {
-                latestScreenPreview = msg.payload.image;
-            }
             screenShareUsername = msg.username || null;
-            if (!document.getElementById('screen-share-play-overlay') &&
-                (!document.getElementById('screen-share-video') || document.getElementById('screen-share-video').classList.contains('hidden'))) {
-                // No video playing yet — show a preview container so user sees something is shared
-                showScreenPreviewPlaceholder();
-            }
             break;
         case 'screen_preview_clear':
-            latestScreenPreview = null;
             screenShareUsername = null;
             removeRemoteVideo();
             break;
@@ -473,7 +458,6 @@ function handleWSMessage(msg) {
                     clearExpandedUsersRail();
                 }
                 attachUserPreviewsToCards();
-                latestScreenPreview = null;
                 screenShareUsername = null;
             }
             break;
@@ -528,29 +512,6 @@ function updateChannelUsers(channelID, users) {
     }
     if (typeof updateActiveHuddleBadges === 'function') updateActiveHuddleBadges();
     if (typeof updateCallIndicators === 'function') updateCallIndicators();
-
-    // Update preview if currently previewing this channel
-    if (previewChannelID === channelID && currentChannelID !== channelID) {
-        const previewUsers = document.getElementById('preview-users');
-        if (previewUsers) {
-            if (users.length > 0) {
-                previewUsers.innerHTML = `
-                    <div class="text-sm text-vc-muted mb-2">${users.length} user${users.length > 1 ? 's' : ''} in channel:</div>
-                    <div class="flex flex-wrap justify-center gap-3 mb-4">
-                        ${users.map(u => `
-                            <div class="flex items-center gap-2 px-3 py-1.5 bg-vc-channel rounded-lg">
-                                <img src="${avatarURL(u.Username)}" class="w-6 h-6 rounded-full">
-                                <span class="text-sm text-vc-text">${escapeHTML(u.Username)}</span>
-                                ${u.Muted ? '<svg class="w-3 h-3 text-vc-red" fill="currentColor" viewBox="0 0 24 24"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.27 3z"/></svg>' : ''}
-                                ${u.Speaking ? '<div class="flex gap-0.5"><div class="w-1 h-2 bg-vc-green rounded-full animate-pulse"></div><div class="w-1 h-3 bg-vc-green rounded-full animate-pulse" style="animation-delay:0.1s"></div></div>' : ''}
-                            </div>
-                        `).join('')}
-                    </div>`;
-            } else {
-                previewUsers.innerHTML = '<div class="text-sm text-vc-muted mb-4">No one in this channel</div>';
-            }
-        }
-    }
 
     // Detect join/leave in current channel for sounds + notifications
     if (channelID === currentChannelID) {
@@ -709,8 +670,6 @@ function closeSidebarOnMobile() {
 }
 
 // ─── Channel Join ─────────────────────────────────────────────
-
-let previewChannelID = null;
 
 function openVoiceChannel(channelID, channelName) {
     // A regular channel click always enters its call. forceHuddle handles the
@@ -984,21 +943,6 @@ function setMeetGridColumns(grid, count) {
     else if (count <= 16) cols = 4;
     else cols = 5;
     grid.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
-}
-
-function userHasCameraTile(userID, username) {
-    const grid = document.getElementById('camera-grid');
-    if (!grid) return false;
-    const selfName = document.getElementById('self-avatar')?.dataset?.username;
-    if (username === selfName) {
-        if (grid.querySelector('#local-camera')) return true;
-        if (grid.querySelector('#local-screen-share')) return true;
-    }
-    const uid = String(userID);
-    if (grid.querySelector(`#remote-cam-camera-${uid}`)) return true;
-    if (grid.querySelector(`#remote-cam-screen-${uid}`)) return true;
-    if (grid.querySelector(`#remote-screen-share-screen-${uid}`)) return true;
-    return false;
 }
 
 function syncAvatarTileVisibility() {
@@ -1660,7 +1604,6 @@ async function handleWebRTCAnswer(payload) {
 async function handleWebRTCOffer(payload) {
     // Server-initiated renegotiation (new peer joined or tracks changed)
     if (!peerConnection) return;
-    lastServerOfferTime = Date.now();
 
     try {
         // Perfect-negotiation: client is the "polite" peer. If we have our
@@ -2587,20 +2530,6 @@ function updateGridColumns() {
     }
 }
 
-function ensureExpandedMode() {
-    const grid = document.getElementById('camera-grid');
-    if (!grid || grid.children.length === 0) return;
-    const expandedEl = expandedCamId ? document.getElementById(expandedCamId) : null;
-    const expandedAlive = expandedEl && grid.contains(expandedEl);
-    if (!expandedAlive) {
-        expandedCamId = null;
-        promoteNextMediaToMainStage();
-    }
-    if (expandedCamId && !document.body.classList.contains('expanded-tile-mode')) {
-        setCamViewMode(expandedCamId, 'expanded');
-    }
-}
-
 let _lastRailTilesSignature = '';
 let _lastRailUserSignature = '';
 
@@ -2931,12 +2860,6 @@ function removeFromCameraGrid(id) {
     attachUserPreviewsToCards();
 }
 
-function showScreenPreviewPlaceholder() {
-    // No-op: remote screen shares are now rendered as tiles in camera-grid
-    // via showRemoteVideo() as soon as the video track arrives. The standalone
-    // preview placeholder is obsolete in the unified-grid layout.
-}
-
 function captureAndSendPreview() {
     if (!screenStream) return;
     const video = document.querySelector('#local-screen-share video');
@@ -2951,13 +2874,13 @@ function captureAndSendPreview() {
 }
 
 function cleanupWebRTC() {
+    stopWSMedia();
     activeCallChannelID = null;
     activeCallChannelName = null;
     _stashedCallNodes = null;
     pendingIceCandidates = [];
     clearInterval(screenPreviewInterval);
     screenPreviewInterval = null;
-    latestScreenPreview = null;
     screenShareUsername = null;
     if (vadInterval) {
         clearInterval(vadInterval);
@@ -2990,7 +2913,6 @@ function cleanupWebRTC() {
     }
     cameraSender = null;
     isCameraOn = false;
-    remoteCameras = {};
     remoteVideoTracks = {};
     const cameraGrid = document.getElementById('camera-grid');
     if (cameraGrid) cameraGrid.remove();
@@ -3255,8 +3177,6 @@ function setupVAD(stream) {
     let gateOpen = false;
     let smoothedGain = 0;
 
-    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-
     vadInterval = setInterval(() => {
         analyser.getByteFrequencyData(dataArray);
 
@@ -3307,7 +3227,6 @@ function setupVAD(stream) {
             sendWS({ type: 'speaking', payload: { speaking: isSpeaking } });
             updateSelfSpeakingUI(isSpeaking);
         }
-        void isIOS;
     }, 50);
 }
 
@@ -3532,15 +3451,6 @@ function showScreenShareResumePrompt() {
     document.body.appendChild(banner);
 }
 
-function startHuddle(toUserId) {
-    outgoingCalleeUserId = toUserId;
-    const dmRow = document.querySelector(`#dm-list [data-other-id="${toUserId}"]`);
-    outgoingCalleeUsername = dmRow ? (dmRow.querySelector('.dm-name')?.textContent || '') : '';
-    sendWS({ type: 'huddle_invite', payload: { to_user_id: toUserId } });
-    showToast('Calling…');
-}
-
-
 async function loadGroupList() {
     try {
         const res = await fetch('/api/groups');
@@ -3612,16 +3522,6 @@ async function loadDMList() {
     } catch (err) {
         console.error('loadDMList failed', err);
     }
-}
-
-function dmRelativeTime(ts) {
-    if (!ts) return '';
-    const diff = Math.max(0, Math.floor(Date.now() / 1000) - ts);
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return Math.floor(diff / 60) + 'm';
-    if (diff < 86400) return Math.floor(diff / 3600) + 'h';
-    if (diff < 86400 * 7) return Math.floor(diff / 86400) + 'd';
-    return new Date(ts * 1000).toLocaleDateString();
 }
 
 function renderDMList(items) {
@@ -3911,10 +3811,6 @@ function openDMChannel(channelId, otherName, otherUserId) {
     } else {
         joinChannel(channelId, otherName, { isDM: true });
     }
-}
-
-function renderDMChatOnly(channelID, displayName) {
-    renderChannelChatOnly(channelID, displayName, { isDM: true });
 }
 
 function renderChannelChatOnly(channelID, displayName, opts) {
@@ -4507,7 +4403,6 @@ function removeChatReaction(msg) {
 const USE_WS_MEDIA = /Android/i.test(navigator.userAgent);
 let wsMediaRecorder = null;
 let wsMediaAudioElements = {}; // userID -> Audio element
-let wsMediaVideoElements = {}; // userID -> container element
 
 async function startWSMedia() {
     try {
@@ -4599,8 +4494,6 @@ function stopWSMedia() {
         el.remove();
     });
     wsMediaAudioElements = {};
-    Object.values(wsMediaVideoElements).forEach(el => el.remove());
-    wsMediaVideoElements = {};
 }
 
 function handleWSMediaFrame(data) {
@@ -4616,9 +4509,6 @@ function handleWSMediaFrame(data) {
     if (type === 0x01) {
         // Audio frame
         playWSAudio(userId, payload);
-    } else if (type === 0x02) {
-        // Video frame (future)
-        playWSVideo(userId, payload);
     }
 }
 
@@ -4652,68 +4542,6 @@ function playNextChunk(audio) {
     audio.src = url;
     audio.play().catch(() => {});
     audio.onended = () => playNextChunk(audio);
-}
-
-function playWSVideo(userId, payload) {
-    // Placeholder for future video support
-}
-
-// WS camera send
-let wsCameraRecorder = null;
-
-async function startWSCamera() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    try {
-        cameraStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
-            audio: false,
-        });
-
-        const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
-            ? 'video/webm;codecs=vp8'
-            : 'video/webm';
-
-        wsCameraRecorder = new MediaRecorder(cameraStream, {
-            mimeType: mimeType,
-            videoBitsPerSecond: 500000,
-        });
-
-        wsCameraRecorder.ondataavailable = (event) => {
-            if (event.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
-                event.data.arrayBuffer().then(buf => {
-                    // Frame: [0x02 (video)] + [payload]
-                    const frame = new Uint8Array(1 + buf.byteLength);
-                    frame[0] = 0x02;
-                    frame.set(new Uint8Array(buf), 1);
-                    ws.send(frame.buffer);
-                });
-            }
-        };
-
-        wsCameraRecorder.start(100); // 100ms chunks
-
-        isCameraOn = true;
-        updateCameraUI();
-        addLocalCameraToGrid();
-
-        cameraStream.getVideoTracks()[0].onended = () => stopWSCamera();
-    } catch (err) {
-        console.error('WS Camera failed:', err);
-    }
-}
-
-function stopWSCamera() {
-    if (wsCameraRecorder && wsCameraRecorder.state !== 'inactive') {
-        wsCameraRecorder.stop();
-        wsCameraRecorder = null;
-    }
-    if (cameraStream) {
-        cameraStream.getTracks().forEach(t => t.stop());
-        cameraStream = null;
-    }
-    isCameraOn = false;
-    updateCameraUI();
-    removeFromCameraGrid('local-camera');
 }
 
 // ─── Auto-join from URL ───────────────────────────────────────
@@ -5351,21 +5179,3 @@ function saveSettings() {
 
 
 
-function adjustUserVolume(username, value) {
-    const vol = parseInt(value) / 100;
-    userVolumes[username] = vol;
-    localStorage.setItem('vocala-vol-' + username, vol);
-    document.querySelectorAll('audio').forEach(el => {
-        el.volume = vol;
-    });
-}
-
-function getUserVolume(username) {
-    if (userVolumes[username] !== undefined) return userVolumes[username];
-    const saved = localStorage.getItem('vocala-vol-' + username);
-    if (saved !== null) {
-        userVolumes[username] = parseFloat(saved);
-        return userVolumes[username];
-    }
-    return 1.0;
-}

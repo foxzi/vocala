@@ -32,15 +32,9 @@
         }
     </script>
     <script src="/static/js/htmx.min.js"></script>
-    <script src="/static/js/htmx-ws.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
         body { font-family: 'Inter', sans-serif; }
-        .speaking-ring { animation: pulse-ring 1.5s ease-in-out infinite; }
-        @keyframes pulse-ring {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 252, 0.4); }
-            50% { box-shadow: 0 0 0 8px rgba(124, 92, 252, 0); }
-        }
         .fade-in { animation: fadeIn 0.2s ease-in; }
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(-4px); }
