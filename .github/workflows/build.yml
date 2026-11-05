@@ -21,3 +21,13 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+      # Catch nfpm.yaml pointing at removed files before a release breaks
+      - name: Package check
+        run: |
+          mkdir -p dist
+          nfpm package --packager deb --target dist/
+          nfpm package --packager rpm --target dist/
