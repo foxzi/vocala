@@ -98,32 +98,17 @@ function toggleSounds() {
     return notifSoundsEnabled;
 }
 
-function toggleRnnoise() {
-    rnnoiseEnabled = !rnnoiseEnabled;
-    localStorage.setItem('vocala-rnnoise', rnnoiseEnabled ? '1' : '0');
-    return rnnoiseEnabled;
-}
-
 function toggleAgc() {
     agcEnabled = !agcEnabled;
     localStorage.setItem('vocala-agc', agcEnabled ? '1' : '0');
-    if (localStream) {
-        localStream.getAudioTracks().forEach(t => {
-            t.applyConstraints({ autoGainControl: agcEnabled }).catch(() => {});
-        });
-    }
+    restartMic();
     return agcEnabled;
 }
 
 function toggleNoiseSuppression() {
     noiseSuppressionEnabled = !noiseSuppressionEnabled;
     localStorage.setItem('vocala-ns', noiseSuppressionEnabled ? '1' : '0');
-    if (localStream) {
-        const effective = noiseSuppressionEnabled && !rnnoiseEnabled;
-        localStream.getAudioTracks().forEach(t => {
-            t.applyConstraints({ noiseSuppression: effective }).catch(() => {});
-        });
-    }
+    restartMic();
     return noiseSuppressionEnabled;
 }
 
@@ -190,6 +175,8 @@ let pttActive = false;
 let audioContext = null;
 let analyser = null;
 let gainNode = null;
+let micSource = null; // localStream -> gainNode
+let vadSource = null; // localStream -> analyser
 let processedStream = null; // audio stream routed through GainNode for VAD control
 let vadInterval = null;
 let isSpeaking = false;
@@ -1365,88 +1352,69 @@ function togglePTT() {
 
 // ─── WebRTC ───────────────────────────────────────────────────
 
-// Loads the RNNoise AudioWorklet (idempotent) and returns a connected node,
-// or null if RNNoise is disabled / failed to load.
-// Cache: ctx -> Promise<void> for addModule. Different contexts must register separately.
-const _rnnoiseRegistered = new WeakMap();
-let _rnnoiseBlobUrl = null;
-
-async function _buildRnnoiseBlobUrl() {
-    if (_rnnoiseBlobUrl) return _rnnoiseBlobUrl;
-    const [wasmJs, workletJs] = await Promise.all([
-        fetch('/static/vendor/rnnoise-sync.js').then(r => r.text()),
-        fetch('/static/js/rnnoise-worklet.js').then(r => r.text()),
-    ]);
-    const blob = new Blob([wasmJs, '\n;\n', workletJs], { type: 'application/javascript' });
-    _rnnoiseBlobUrl = URL.createObjectURL(blob);
-    return _rnnoiseBlobUrl;
+function micConstraints() {
+    const c = {
+        echoCancellation: true,
+        noiseSuppression: noiseSuppressionEnabled,
+        autoGainControl: agcEnabled,
+    };
+    if (selectedMicId) c.deviceId = { exact: selectedMicId };
+    return c;
 }
 
-async function loadRnnoiseNode(ctx) {
-    if (!rnnoiseEnabled) return null;
+// Re-acquires the microphone with current settings and swaps it into the
+// audio graph. processedStream stays the same, so senders need no changes.
+// Chrome ignores applyConstraints for audio processing flags on a live track.
+// Calls are chained so quick toggles apply in order.
+let _micRestart = Promise.resolve();
+function restartMic() {
+    _micRestart = _micRestart.then(_restartMic);
+    return _micRestart;
+}
+
+async function _restartMic() {
+    if (!localStream || !audioContext || !gainNode) return;
     try {
-        if (ctx.sampleRate !== 48000) {
-            console.warn('RNNoise: AudioContext sampleRate is', ctx.sampleRate, 'expected 48000, skipping');
-            return null;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints(), video: false });
+        // Call may have ended while waiting for the device.
+        if (!localStream || !audioContext || !gainNode) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
         }
-        let p = _rnnoiseRegistered.get(ctx);
-        if (!p) {
-            const url = await _buildRnnoiseBlobUrl();
-            p = ctx.audioWorklet.addModule(url);
-            _rnnoiseRegistered.set(ctx, p);
+        const old = localStream;
+        localStream = stream;
+        if (micSource) micSource.disconnect();
+        micSource = audioContext.createMediaStreamSource(stream);
+        micSource.connect(gainNode);
+        if (vadSource && analyser) {
+            vadSource.disconnect();
+            vadSource = audioContext.createMediaStreamSource(stream);
+            vadSource.connect(analyser);
         }
-        await p;
-        return new AudioWorkletNode(ctx, 'NoiseSuppressorWorklet', {
-            numberOfInputs: 1,
-            numberOfOutputs: 1,
-            channelCount: 1,
-            channelCountMode: 'explicit',
-        });
+        old.getTracks().forEach(t => t.stop());
     } catch (e) {
-        console.error('RNNoise worklet failed to load, falling back to browser NS:', e);
-        _rnnoiseRegistered.delete(ctx);
-        return null;
+        console.error('Failed to restart microphone:', e);
     }
 }
 
 async function startWebRTC() {
     try {
-        const audioConstraints = {
-            echoCancellation: true,
-            noiseSuppression: !rnnoiseEnabled && noiseSuppressionEnabled,
-            autoGainControl: !rnnoiseEnabled && agcEnabled,
-        };
-        if (selectedMicId) audioConstraints.deviceId = { exact: selectedMicId };
         localStream = await navigator.mediaDevices.getUserMedia({
-            audio: audioConstraints,
+            audio: micConstraints(),
             video: false,
         });
         hideGlobalMicWarning();
 
-        audioContext = new AudioContext(rnnoiseEnabled ? { sampleRate: 48000 } : undefined);
+        audioContext = new AudioContext();
         if (audioContext.state === 'suspended') {
             try { await audioContext.resume(); } catch (_) {}
         }
-        const rnnoiseNode = await loadRnnoiseNode(audioContext);
-        const source = audioContext.createMediaStreamSource(localStream);
-
-        let compressor = null;
-        if (rnnoiseEnabled) {
-            compressor = audioContext.createDynamicsCompressor();
-            compressor.threshold.value = -28;
-            compressor.knee.value = 20;
-            compressor.ratio.value = 4;
-            compressor.attack.value = 0.005;
-            compressor.release.value = 0.12;
-        }
+        micSource = audioContext.createMediaStreamSource(localStream);
 
         gainNode = audioContext.createGain();
         gainNode.gain.value = (pushToTalk || isMuted) ? 0.0 : 1.0;
         const dest = audioContext.createMediaStreamDestination();
-        let head = source;
-        if (rnnoiseNode) { head.connect(rnnoiseNode); head = rnnoiseNode; }
-        if (compressor) { head.connect(compressor); head = compressor; }
-        head.connect(gainNode);
+        micSource.connect(gainNode);
         gainNode.connect(dest);
         processedStream = dest.stream;
 
@@ -3039,6 +3007,8 @@ function cleanupWebRTC() {
         localStream = null;
     }
     gainNode = null;
+    micSource = null;
+    vadSource = null;
     isSpeaking = false;
 }
 
@@ -3267,8 +3237,8 @@ function setupVAD(stream) {
     analyser.fftSize = 1024;
     analyser.smoothingTimeConstant = 0.2;
 
-    const source = audioContext.createMediaStreamSource(stream);
-    source.connect(analyser);
+    vadSource = audioContext.createMediaStreamSource(stream);
+    vadSource.connect(analyser);
 
     const freqBins = analyser.frequencyBinCount;
     const sampleRate = audioContext.sampleRate;
@@ -3328,7 +3298,7 @@ function setupVAD(stream) {
         }
         if (gateOpen && speech <= openThresh) speechHoldFrames--;
 
-        const target = gateOpen ? 1.0 : (rnnoiseEnabled ? 0.15 : 0.0);
+        const target = gateOpen ? 1.0 : 0.0;
         smoothedGain += (target - smoothedGain) * (target > smoothedGain ? 0.6 : 0.25);
         if (gainNode) gainNode.gain.value = Math.max(0, Math.min(1, smoothedGain));
 
@@ -4542,31 +4512,21 @@ let wsMediaVideoElements = {}; // userID -> container element
 async function startWSMedia() {
     try {
         localStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                echoCancellation: true,
-                noiseSuppression: noiseSuppressionEnabled && !rnnoiseEnabled,
-                autoGainControl: agcEnabled && !rnnoiseEnabled,
-            },
+            audio: micConstraints(),
             video: false,
         });
         hideGlobalMicWarning();
 
         // Setup VAD (reads raw stream for level detection)
-        audioContext = new AudioContext(rnnoiseEnabled ? { sampleRate: 48000 } : undefined);
+        audioContext = new AudioContext();
         if (audioContext.state === 'suspended') {
             try { await audioContext.resume(); } catch (_) {}
         }
-        const rnnoiseNode = await loadRnnoiseNode(audioContext);
-        const source = audioContext.createMediaStreamSource(localStream);
+        micSource = audioContext.createMediaStreamSource(localStream);
         gainNode = audioContext.createGain();
         gainNode.gain.value = (pushToTalk || isMuted) ? 0.0 : 1.0;
         const dest = audioContext.createMediaStreamDestination();
-        if (rnnoiseNode) {
-            source.connect(rnnoiseNode);
-            rnnoiseNode.connect(gainNode);
-        } else {
-            source.connect(gainNode);
-        }
+        micSource.connect(gainNode);
         gainNode.connect(dest);
         processedStream = dest.stream;
         setupVAD(localStream);
@@ -5210,9 +5170,8 @@ async function generateGuestLink(channelId, hours, btn) {
 
 // --- Settings modal (devices, sounds) ---
 
-let rnnoiseEnabled = (localStorage.getItem('vocala-rnnoise') ?? '1') === '1';
-let agcEnabled = localStorage.getItem('vocala-agc') !== '0';
-let noiseSuppressionEnabled = localStorage.getItem('vocala-ns') !== '0';
+let agcEnabled = localStorage.getItem('vocala-agc') === '1';
+let noiseSuppressionEnabled = localStorage.getItem('vocala-ns') === '1';
 let selectedMicId = localStorage.getItem('vocala-mic') || '';
 let selectedCamId = localStorage.getItem('vocala-cam') || '';
 let selectedSpkId = localStorage.getItem('vocala-spk') || '';
@@ -5276,15 +5235,6 @@ async function openSettings() {
                             class="rounded border-vc-border text-vc-accent focus:ring-vc-accent"
                             onchange="toggleNoiseSuppression()">
                     </label>
-                </div>
-                <div class="border-t border-vc-border pt-3">
-                    <label class="flex items-center justify-between cursor-pointer">
-                        <span class="text-sm text-vc-text">RNNoise (enhanced noise suppression)</span>
-                        <input type="checkbox" id="settings-rnnoise" ${rnnoiseEnabled ? 'checked' : ''}
-                            class="rounded border-vc-border text-vc-accent focus:ring-vc-accent"
-                            onchange="toggleRnnoise()">
-                    </label>
-                    <p class="text-xs text-vc-muted mt-1">Rejoin the channel to apply.</p>
                 </div>
                 <div class="border-t border-vc-border pt-3">
                     <div class="text-xs font-medium text-vc-muted mb-2">Change Password</div>
@@ -5380,6 +5330,7 @@ function saveSettings() {
     const cam = document.getElementById('settings-cam')?.value || '';
     const spk = document.getElementById('settings-spk')?.value || '';
 
+    const micChanged = mic !== selectedMicId;
     selectedMicId = mic;
     selectedCamId = cam;
     selectedSpkId = spk;
@@ -5393,6 +5344,7 @@ function saveSettings() {
             if (el.setSinkId) el.setSinkId(spk).catch(() => {});
         });
     }
+    if (micChanged) restartMic();
 
     document.getElementById('settings-modal')?.remove();
 }
