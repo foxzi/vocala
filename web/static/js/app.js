@@ -1333,7 +1333,9 @@ async function _restartMic() {
 
 // attachRemoteAudio plays a remote audio track. The SFU keeps the stream id
 // "audio-<uid>" across a user's reconnects, so an existing element is rebound
-// to the new track instead of being kept on the old, ended one.
+// to the stream instead of being kept on the old one. The element plays the
+// stream, not the track: the SFU may reuse a transceiver (and so the same
+// receiver track) for another user, and the old stream then loses the track.
 function attachRemoteAudio(event) {
     const stream = event.streams[0] || new MediaStream([event.track]);
     const audioStreamId = stream.id || '';
@@ -1350,7 +1352,8 @@ function attachRemoteAudio(event) {
         if (localMutedUsers.has(uid)) audio.muted = true;
         document.body.appendChild(audio);
     }
-    audio.srcObject = new MediaStream([event.track]);
+    audio.srcObject = null;
+    audio.srcObject = stream;
     audio.play().catch(() => {});
 }
 
@@ -1899,6 +1902,16 @@ function removeLocalScreenPreview() {
 // a publisher whose camera is currently off still has a live (idle) track,
 // but it stays muted and no tile is created until they turn it back on.
 function attachRemoteVideoTrack(stream, track) {
+    // After someone leaves, the SFU reuses their freed transceiver for the
+    // next video track, and the browser hands out the same receiver track
+    // under a new stream id. Drop the stale entry so its tile does not stay
+    // frozen and its mute handlers are not shared with the new owner.
+    for (const [id, e] of Object.entries(remoteVideoTracks)) {
+        if (id !== stream.id && e.track === track) {
+            delete remoteVideoTracks[id];
+            hideRemoteVideoTile(id);
+        }
+    }
     remoteVideoTracks[stream.id] = { stream, track };
     const show = () => showRemoteVideoTile(stream.id);
     if (!track.muted) show();
