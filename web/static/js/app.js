@@ -328,6 +328,11 @@ function handleWSMessage(msg) {
         case 'ice_candidate':
             handleRemoteICECandidate(msg.payload);
             break;
+        case 'channel_removed':
+            // Removed from a private channel: drop the call/chat and its sidebar entry
+            if (currentChannelID === msg.channel_id) leaveChannel();
+            document.querySelector(`.channel-item[data-channel-id="${msg.channel_id}"]`)?.remove();
+            break;
         case 'force_muted':
             // Admin force-muted you
             if (!isMuted) {

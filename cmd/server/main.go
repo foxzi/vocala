@@ -1349,6 +1349,9 @@ func handleChannelMemberRemove(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to remove member", http.StatusInternalServerError)
 		return
 	}
+	if !channel.CanJoin(chID, memberID, false) {
+		signaling.KickFromChannel(chID, memberID)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"ok": true})

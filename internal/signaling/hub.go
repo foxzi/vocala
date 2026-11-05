@@ -1412,6 +1412,24 @@ func broadcastChannelUpdate(channelID int64) {
 	GlobalHub.Broadcast(data)
 }
 
+// KickFromChannel drops a user who lost access to a channel: ends their
+// call there, stops chat delivery and tells the client to leave.
+func KickFromChannel(channelID, userID int64) {
+	removeChatWatcher(channelID, userID)
+	if channel.GetUserChannel(userID) == channelID {
+		channel.Leave(userID)
+		cleanupWebRTC(channelID, userID)
+		clearPreviewIfSharer(channelID, userID)
+		broadcastChannelUpdate(channelID)
+		broadcastPresence()
+	}
+	msg, _ := json.Marshal(map[string]any{
+		"type":       "channel_removed",
+		"channel_id": channelID,
+	})
+	GlobalHub.SendToPriority(userID, msg)
+}
+
 func broadcastPresence() {
 	states := channel.GetAllChannelStates()
 	data, _ := json.Marshal(map[string]any{
