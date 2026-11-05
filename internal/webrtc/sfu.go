@@ -188,7 +188,13 @@ func getAPI() *webrtc.API {
 			}
 		}
 		if natIP != "" {
-			s.SetNAT1To1IPs([]string{natIP}, webrtc.ICECandidateTypeHost)
+			if err := s.SetICEAddressRewriteRules(webrtc.ICEAddressRewriteRule{
+				External:        []string{natIP},
+				AsCandidateType: webrtc.ICECandidateTypeHost,
+				Mode:            webrtc.ICEAddressRewriteReplace,
+			}); err != nil {
+				logger.Error("webrtc: invalid NAT IP %q: %v", natIP, err)
+			}
 		}
 		if udpPortMin > 0 && udpPortMax > 0 {
 			s.SetEphemeralUDPPortRange(udpPortMin, udpPortMax)

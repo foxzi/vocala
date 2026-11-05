@@ -52,7 +52,7 @@ jobs:
       - uses: actions/setup-go@v5
         if: steps.ver.outputs.skip != 'true'
         with:
-          go-version: '1.25'
+          go-version: '1.26'
 
       - name: Build binary
         if: steps.ver.outputs.skip != 'true'
