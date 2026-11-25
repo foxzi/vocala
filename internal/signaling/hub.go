@@ -428,7 +428,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		if chID := channel.Leave(client.UserID); chID > 0 {
 			cleanupWebRTC(chID, client.UserID)
 			clearPreviewIfSharer(chID, client.UserID)
-			broadcastChannelUpdate(chID)
+			channelUsersChanged(chID)
 			broadcastPresence()
 		}
 	}
@@ -503,7 +503,7 @@ func (c *Client) readPump() {
 		if chID > 0 {
 			cleanupWebRTC(chID, c.UserID)
 			clearPreviewIfSharer(chID, c.UserID)
-			broadcastChannelUpdate(chID)
+			channelUsersChanged(chID)
 		}
 		broadcastPresence()
 	}()
@@ -635,10 +635,12 @@ func handleMessage(c *Client, msg Message) {
 		channel.Join(p.ChannelID, c.UserID, c.Username)
 
 		if oldCh > 0 {
-			broadcastChannelUpdate(oldCh)
+			channelUsersChanged(oldCh)
 		}
 		broadcastChannelUpdate(p.ChannelID)
 		broadcastPresence()
+
+		sendRecordingState(c.UserID, p.ChannelID)
 
 		// Send current screen preview to the joining user if one exists
 		previewMu.RLock()
@@ -710,7 +712,7 @@ func handleMessage(c *Client, msg Message) {
 		if chID > 0 {
 			cleanupWebRTC(chID, c.UserID)
 			clearPreviewIfSharer(chID, c.UserID)
-			broadcastChannelUpdate(chID)
+			channelUsersChanged(chID)
 		}
 		broadcastPresence()
 
@@ -901,6 +903,12 @@ func handleMessage(c *Client, msg Message) {
 			sfu.SetStreamKind(c.UserID, p.StreamID, p.Kind)
 			logger.Info("signaling: user %d media_track stream=%q kind=%q", c.UserID, p.StreamID, p.Kind)
 		}
+
+	case "recording_start":
+		handleRecordingStart(c)
+
+	case "recording_stop":
+		handleRecordingStop(c)
 
 	case "ws_media_mode":
 		c.IsWSMedia = true
@@ -1477,7 +1485,7 @@ func KickFromChannel(channelID, userID int64) {
 		channel.Leave(userID)
 		cleanupWebRTC(channelID, userID)
 		clearPreviewIfSharer(channelID, userID)
-		broadcastChannelUpdate(channelID)
+		channelUsersChanged(channelID)
 		broadcastPresence()
 	}
 	msg, _ := json.Marshal(map[string]any{

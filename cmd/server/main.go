@@ -567,6 +567,7 @@ func main() {
 	logger.SetLevel(logger.ParseLevel(cfg.Server.LogLevel))
 
 	database.Init(cfg.Database.Path)
+	setupRecording()
 
 	// Set NAT IP for WebRTC ICE candidates (required in Docker)
 	if cfg.WebRTC.NATIP != "" {
@@ -675,6 +676,8 @@ func main() {
 	mux.HandleFunc("/api/dms", requireAuth(handleListDMs))
 	mux.HandleFunc("/api/dms/open", requireAuth(csrfProtect(handleOpenDM)))
 	mux.HandleFunc("/api/groups", requireAuth(handleListGroups))
+	mux.HandleFunc("/api/recordings", requireAuth(handleRecordings))
+	mux.HandleFunc("/api/recordings/audio", requireAuth(handleRecordingAudio))
 	mux.HandleFunc("/account/password", requireAuth(csrfProtect(handleChangePassword)))
 
 	// Guest routes
@@ -722,6 +725,10 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Fatal("server shutdown error:", err)
+	}
+	if recorder != nil {
+		// Finish files of calls still being recorded.
+		recorder.StopAll()
 	}
 	logger.Info("Server stopped")
 }
@@ -963,12 +970,14 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 	iceServers := buildICEServers()
 
 	data := map[string]any{
-		"User":            user,
-		"Channels":        channels,
-		"CacheBust":       cacheBust,
-		"CSRFToken":       csrfToken,
-		"ICEServers":      iceServers,
-		"AutoJoinChannel": autoJoinChannel,
+		"User":                   user,
+		"Channels":               channels,
+		"CacheBust":              cacheBust,
+		"CSRFToken":              csrfToken,
+		"ICEServers":             iceServers,
+		"AutoJoinChannel":        autoJoinChannel,
+		"RecordingEnabled":       recorder != nil,
+		"RecordingRetentionDays": cfg.Recording.RetentionDays,
 	}
 	templates["app.html"].ExecuteTemplate(w, "layout.html", data)
 }
@@ -1666,12 +1675,14 @@ func handleGuestApp(w http.ResponseWriter, r *http.Request) {
 	iceServers := buildICEServers()
 
 	templates["guest-app.html"].ExecuteTemplate(w, "layout.html", map[string]any{
-		"GuestName":   gs.GuestName,
-		"GuestToken":  guestToken,
-		"ChannelID":   ch.ID,
-		"ChannelName": ch.Name,
-		"ICEServers":  iceServers,
-		"CacheBust":   cacheBust,
+		"GuestName":              gs.GuestName,
+		"GuestToken":             guestToken,
+		"ChannelID":              ch.ID,
+		"ChannelName":            ch.Name,
+		"ICEServers":             iceServers,
+		"RecordingEnabled":       recorder != nil,
+		"RecordingRetentionDays": cfg.Recording.RetentionDays,
+		"CacheBust":              cacheBust,
 	})
 }
 

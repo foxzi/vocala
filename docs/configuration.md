@@ -42,6 +42,17 @@ auth:
 
 security:
   allowed_origins: []       # Empty = same-origin only
+
+storage:
+  backend: "local"          # only "local" for now; S3 is planned
+  local:
+    dir: ""                 # empty = "storage" next to the database file
+
+recording:
+  enabled: true             # server-side call recording
+  tmp_dir: ""               # files being written; default <storage dir>/tmp
+  max_hours: 4              # stop a forgotten recording (0 = no limit)
+  retention_days: 30        # delete older recordings (0 = keep forever)
 ```
 
 ### Environment Variables
@@ -57,6 +68,14 @@ Env vars override YAML settings:
 | `VOCALA_TURN_PORT` | `3478` | TURN UDP port |
 | `VOCALA_COOKIE_SECURE` | `false` | Set `true` or `1` for HTTPS |
 | `VOCALA_REGISTRATION` | `true` | Set `false` or `0` to disable public registration |
+| `VOCALA_STORAGE_DIR` | *(next to the DB)* | Directory for recordings |
+| `VOCALA_RECORDING` | `true` | Set `false` or `0` to disable call recording |
+
+### Call Recording
+
+Any participant can start recording a call with the record button; everyone in the call sees a "REC" indicator, and people who join later are told the call is being recorded. The server writes each participant's audio to its own Ogg/Opus file without re-encoding. Recording stops when someone presses the button again, when the last participant leaves, or after `max_hours`. Channel members find recordings under **Recordings** in the channel header. Design: [ADR-0001](adr/0001-recording-and-transcription.md).
+
+Not recorded yet: the WebSocket audio fallback (an Android client that joined without a microphone and turned it on later). Regular Android calls use WebRTC and are recorded.
 
 ### Examples
 
@@ -146,6 +165,8 @@ Vocala настраивается через файл `config.yaml` и/или п
 - `turn` -- встроенный TURN/TURNS сервер, TLS-настройки
 - `auth` -- длина сессий, минимальная длина пароля, secure cookie, rate limit
 - `security` -- разрешённые origins для WebSocket
+- `storage` -- где хранятся записи: `local.dir` (по умолчанию `storage` рядом с файлом БД); S3 — позже
+- `recording` -- запись звонков: `enabled`, `max_hours` (предел длины записи), `retention_days` (срок хранения, 0 = вечно)
 
 ### Переменные окружения
 
@@ -158,6 +179,14 @@ Vocala настраивается через файл `config.yaml` и/или п
 | `VOCALA_TURN_PORT` | `3478` | UDP-порт TURN |
 | `VOCALA_COOKIE_SECURE` | `false` | `true` или `1` для HTTPS |
 | `VOCALA_REGISTRATION` | `true` | `false` или `0`, чтобы отключить публичную регистрацию |
+| `VOCALA_STORAGE_DIR` | *(рядом с БД)* | Каталог для записей |
+| `VOCALA_RECORDING` | `true` | `false` или `0`, чтобы выключить запись звонков |
+
+### Запись звонков
+
+Запись включает любой участник кнопкой записи; у всех в звонке горит индикатор «REC», а вошедшим позже сообщается, что идёт запись. Сервер пишет звук каждого участника в свой файл Ogg/Opus без перекодирования. Запись останавливается кнопкой, когда звонок покинул последний участник, или через `max_hours`. Записи канала — кнопка **Recordings** в шапке канала. Решение — [ADR-0001](adr/0001-recording-and-transcription.md).
+
+Пока не записывается запасной путь через WebSocket (Android-клиент вошёл без микрофона и включил его позже). Обычные звонки с Android идут через WebRTC и записываются.
 
 ### Примеры
 

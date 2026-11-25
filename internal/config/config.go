@@ -9,13 +9,33 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Database DatabaseConfig `yaml:"database"`
-	WebRTC   WebRTCConfig   `yaml:"webrtc"`
-	TURN     TURNConfig     `yaml:"turn"`
-	Auth     AuthConfig     `yaml:"auth"`
-	OAuth    OAuthConfig    `yaml:"oauth"`
-	Security SecurityConfig `yaml:"security"`
+	Server    ServerConfig    `yaml:"server"`
+	Database  DatabaseConfig  `yaml:"database"`
+	WebRTC    WebRTCConfig    `yaml:"webrtc"`
+	TURN      TURNConfig      `yaml:"turn"`
+	Auth      AuthConfig      `yaml:"auth"`
+	OAuth     OAuthConfig     `yaml:"oauth"`
+	Security  SecurityConfig  `yaml:"security"`
+	Storage   StorageConfig   `yaml:"storage"`
+	Recording RecordingConfig `yaml:"recording"`
+}
+
+// StorageConfig selects where finished files (recordings) are kept.
+type StorageConfig struct {
+	Backend string             `yaml:"backend"` // "local" (S3 later)
+	Local   LocalStorageConfig `yaml:"local"`
+}
+
+type LocalStorageConfig struct {
+	Dir string `yaml:"dir"` // empty = <directory of database.path>/storage
+}
+
+// RecordingConfig controls server-side call recording.
+type RecordingConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	TmpDir        string `yaml:"tmp_dir"`        // files being written; default <storage.local.dir>/tmp
+	MaxHours      int    `yaml:"max_hours"`      // stop a forgotten recording; 0 = no limit
+	RetentionDays int    `yaml:"retention_days"` // 0 = keep forever
 }
 
 type ServerConfig struct {
@@ -102,6 +122,14 @@ func Default() *Config {
 			Port:    3478,
 			TLSPort: 5349,
 		},
+		Storage: StorageConfig{
+			Backend: "local",
+		},
+		Recording: RecordingConfig{
+			Enabled:       true,
+			MaxHours:      4,
+			RetentionDays: 30,
+		},
 		Auth: AuthConfig{
 			SessionDays:         30,
 			MinPassword:         8,
@@ -159,6 +187,14 @@ func envOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("VOCALA_COOKIE_SECURE"); v == "true" || v == "1" {
 		cfg.Auth.CookieSecure = true
+	}
+	if v := os.Getenv("VOCALA_STORAGE_DIR"); v != "" {
+		cfg.Storage.Local.Dir = v
+	}
+	if v := os.Getenv("VOCALA_RECORDING"); v == "false" || v == "0" {
+		cfg.Recording.Enabled = false
+	} else if v == "true" || v == "1" {
+		cfg.Recording.Enabled = true
 	}
 	if v := os.Getenv("VOCALA_REGISTRATION"); v == "false" || v == "0" {
 		cfg.Auth.RegistrationEnabled = false
