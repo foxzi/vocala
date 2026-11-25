@@ -69,11 +69,12 @@ type Blobs interface {
 ## 3. Данные
 
 ```
-recordings          id, channel_id, started_by, started_at, ended_at,
-                    status (recording|processing|ready|failed), transcript_key
-recording_segments  id, recording_id, user_id, display_name, started_at,
-                    duration_ms, key, format (ogg|webm)
-transcription_jobs  recording_id, status, attempts, error, updated_at
+recordings          id, channel_id, started_by_id, started_by_name, started_at_ms,
+                    ended_at_ms, status (recording|ready|failed),
+                    transcript_status ('' |pending|running|ready|failed),
+                    transcript_key, transcript_attempts
+recording_segments  id, recording_id, user_id, display_name, started_at_ms,
+                    duration_ms, storage_key, format (ogg|webm|mp4), stored
 ```
 
 `display_name` пишется в сегмент сразу: гостевые сессии временные, через месяц имени гостя уже не найти.
@@ -82,24 +83,31 @@ transcription_jobs  recording_id, status, attempts, error, updated_at
 
 ## 4. Расшифровка — после звонка, очередь на одно место
 
-Контейнер speaches с теми же закреплёнными образом (digest как в `platform-apps/apps/whisper/app.yaml`) и настройками: `faster-whisper-medium`, `int8`, CPU, 4 потока, `WHISPER__TTL=-1`, без UI. В `docker-compose.yaml` — сервис `whisper` без опубликованного порта, видит его только `vocala`. В deb-пакет не входит: `transcription.url` пуст — запись работает, расшифровки нет.
+Контейнер speaches с теми же закреплёнными образом (digest как в `platform-apps/apps/whisper/app.yaml`) и настройками: `faster-whisper-medium`, `int8`, CPU, 4 потока, `WHISPER__TTL=-1`, без UI, `cpus: 4`, `mem_limit: 4g`. В `docker-compose.yaml` — сервис `whisper` в профиле `stt` (`docker compose --profile stt up -d` и `VOCALA_STT_URL=http://whisper:8000` в `.env`), без опубликованного порта, в отдельной сети `speech` только с `vocala`; модели — в томе `whisper-models`. В deb-пакет не входит: `transcription.url` пуст — запись работает, расшифровки нет.
 
 Клиент — порт `backend/internal/speech` из платформы (`Prepare` готовит модель при старте, `Clean` вырезает «Продолжение следует», «Субтитры сделал…» и т. п.).
 
 Порядок:
 
-1. Запись остановлена → `status=processing`, задача в `transcription_jobs` (в базе — переживает перезапуск).
+1. Файлы записи в хранилище (после остановки или восстановления после падения) → `recordings.transcript_status = pending`. Очередь — это колонки строки записи (`transcript_status`, `transcript_key`, `transcript_attempts`), а не отдельная таблица: у записи ровно одна расшифровка, и удаление записи по сроку хранения забирает её файл. Переживает перезапуск: задачи в состоянии `running` при старте возвращаются в `pending`.
 2. Один фоновый обработчик на сервер, сегменты по одному: `POST /v1/audio/transcriptions` с `language=ru`, `response_format=verbose_json`, `timestamp_granularities[]=segment`, `vad_filter=true`.
 3. Фразы из ответа (`segments[].start/end`, секунды) сдвигаются на начало сегмента, всё сортируется по времени и склеивается в `transcript.md`:
    ```
    [00:01:23] Иван: …
    [00:01:31] Мария: …
    ```
-4. `transcript.md` → хранилище, `status=ready`, в чат канала — сообщение со ссылкой.
+   Соседние фразы одного человека с паузой меньше 2 секунд склеиваются в одну строку.
+4. `transcript.md` → хранилище (`recordings/<id>/transcript.md`), `transcript_status=ready`, в чат канала — системное сообщение «📝 Transcript of the recording from 15:04 is ready — see Recordings».
 
 Проверено по исходникам speaches 0.8.3 (`routers/stt.py`, `api_types.py`, `config.py`): `verbose_json` возвращает сегменты со `start`/`end`; `timestamp_granularities[]` принимается; `vad_filter` по умолчанию включён; ogg/webm декодирует PyAV. Ограничения размера в коде нет — час opus (≈15 МБ) уходит одним запросом.
 
-**Тайм-аут** — не фиксированные 3 минуты, как в платформе, а от длины сегмента: `5 мин + 2 × длительность`. Ошибка — до 3 попыток, затем `status=failed` и кнопка «Повторить».
+**Тайм-аут** — не фиксированные 3 минуты, как в платформе, а от длины сегмента: `5 мин + 2 × длительность`. Ошибка сервиса (4xx/5xx, обрыв соединения посреди запроса — например, сервис упал на длинном файле) — до 3 попыток с паузой в минуту, затем `failed` и кнопка «Try again» в списке записей. Попыткой не считается только то, что до сервиса не дошло: не удалось подключиться (не поднялся, перезапускается, имя не резолвится), 502/503 и 404 «модель не установлена» — задача ждёт 30 секунд и возвращается в очередь. Очередь берёт сначала задачи с меньшим числом попыток, чтобы падающая запись не держала остальные. Пока `Prepare` не скачал и не загрузил модель (при первом запуске — до получаса), очередь не начинает работу.
+
+Готовую расшифровку повторно не запускают (каждый прогон — четыре потока процессора на время записи): в очередь ставится только запись без расшифровки или со сбоем, и только если у неё есть сохранённый звук.
+
+Фильтр галлюцинаций знает только русские фразы (`language: ru`); при автоопределении или английской речи английские хвосты («Thank you for watching») не вырезаются, а сказанное вслух «продолжение следует» вырежется.
+
+Время в заголовке расшифровки — по часам сервера с поясом (в Docker это UTC); в сообщении в чате времени нет.
 
 **Скорость** (оценка по замеру ADR-0041, не замер): на Zen 4 — около 0,4 длительности речи; на i7-6700 — до 1×. Тишина почти бесплатна (VAD), поэтому час встречи с четырьмя участниками ≈ час суммарной речи, а не четыре.
 
@@ -108,7 +116,7 @@ transcription_jobs  recording_id, status, attempts, error, updated_at
 ## 5. Интерфейс
 
 - В канале — список записей: дата, длительность, участники, статус расшифровки.
-- Карточка записи: текст расшифровки, скачать `.md`; дорожки участников — проигрыватель и скачивание по отдельности.
+- Карточка записи: текст расшифровки (показать/скачать `.md`), «Transcribe» для записей без расшифровки и «Try again» после сбоя; дорожки участников — проигрыватель и скачивание по отдельности.
 - Синхронное воспроизведение всех дорожек в браузере и общий файл — потом.
 
 ## 6. Порядок работ (отдельные PR)

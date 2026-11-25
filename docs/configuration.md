@@ -53,6 +53,11 @@ recording:
   tmp_dir: ""               # files being written; default <storage dir>/tmp
   max_hours: 4              # stop a forgotten recording (0 = no limit)
   retention_days: 30        # delete older recordings (0 = keep forever)
+
+transcription:
+  url: ""                   # speech service, e.g. http://whisper:8000; empty = off
+  model: "Systran/faster-whisper-medium"
+  language: "ru"            # empty = detect
 ```
 
 ### Environment Variables
@@ -70,6 +75,9 @@ Env vars override YAML settings:
 | `VOCALA_REGISTRATION` | `true` | Set `false` or `0` to disable public registration |
 | `VOCALA_STORAGE_DIR` | *(next to the DB)* | Directory for recordings |
 | `VOCALA_RECORDING` | `true` | Set `false` or `0` to disable call recording |
+| `VOCALA_STT_URL` | *(disabled)* | Speech service for transcripts, e.g. `http://whisper:8000` |
+| `VOCALA_STT_MODEL` | `Systran/faster-whisper-medium` | Whisper model |
+| `VOCALA_STT_LANGUAGE` | `ru` | Speech language; empty = detect |
 
 ### Call Recording
 
@@ -151,6 +159,12 @@ SQLite database is created automatically on first run. WAL mode is enabled for c
 
 ---
 
+### Transcripts
+
+With `transcription.url` set, every finished recording is transcribed by a self-hosted speech service — [speaches](https://github.com/speaches-ai/speaches) with faster-whisper on the CPU, the same setup as our platform. Each participant's track is recognized separately, so the transcript knows who spoke; the lines are laid out on the call's timeline (`[00:01:23] Ivan: …`). One recording at a time, in the background; when it is done, the channel chat gets a notice and **Recordings** shows the text and a `.md` download.
+
+With Docker: set `VOCALA_STT_URL=http://whisper:8000` in `.env` and run `docker compose --profile stt up -d`. The `whisper` service needs up to 4 CPUs and 4 GB of RAM and downloads the model (1.5 GB for medium) from Hugging Face on first start. Audio does not leave your network.
+
 ## Русский
 
 Vocala настраивается через файл `config.yaml` и/или переменные окружения. Переменные окружения перекрывают значения из YAML.
@@ -181,6 +195,9 @@ Vocala настраивается через файл `config.yaml` и/или п
 | `VOCALA_REGISTRATION` | `true` | `false` или `0`, чтобы отключить публичную регистрацию |
 | `VOCALA_STORAGE_DIR` | *(рядом с БД)* | Каталог для записей |
 | `VOCALA_RECORDING` | `true` | `false` или `0`, чтобы выключить запись звонков |
+| `VOCALA_STT_URL` | *(выключено)* | Сервис распознавания для расшифровок, например `http://whisper:8000` |
+| `VOCALA_STT_MODEL` | `Systran/faster-whisper-medium` | Модель Whisper |
+| `VOCALA_STT_LANGUAGE` | `ru` | Язык речи; пусто — определять |
 
 ### Запись звонков
 
@@ -220,3 +237,9 @@ SQLite создаётся автоматически при первом зап�
 - Протухшие сессии автоматически очищаются каждый час
 - Токены -- 64-символьные hex-строки (32 байта энтропии)
 - Guest-сессии используют отдельную временную cookie, привязаны к одному каналу и создаются из ссылок `/guest/{token}`
+
+### Расшифровки
+
+Если задан `transcription.url`, каждая законченная запись расшифровывается своим сервисом распознавания — [speaches](https://github.com/speaches-ai/speaches) с faster-whisper на процессоре, как в нашей платформе. Дорожка каждого участника распознаётся отдельно, поэтому расшифровка знает, кто говорил; строки раскладываются по времени звонка (`[00:01:23] Иван: …`). По одной записи, в фоне; по готовности в чат канала приходит сообщение, а в **Recordings** — текст и скачивание `.md`.
+
+В Docker: `VOCALA_STT_URL=http://whisper:8000` в `.env` и `docker compose --profile stt up -d`. Сервису `whisper` нужно до 4 процессоров и 4 ГБ памяти; модель (1,5 ГБ для medium) скачивается с Hugging Face при первом запуске. Звук не покидает вашу сеть.

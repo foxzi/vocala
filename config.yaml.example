@@ -76,3 +76,11 @@ recording:
   tmp_dir: ""               # files being written; default <storage.local.dir>/tmp
   max_hours: 4              # stop a forgotten recording (0 = no limit)
   retention_days: 30        # delete older recordings (0 = keep forever)
+
+# Transcripts of recordings by a self-hosted speech service (speaches /
+# faster-whisper, see the `whisper` service in docker-compose.yaml).
+# Audio does not leave your network. Empty url = no transcripts.
+transcription:
+  url: ""                   # VOCALA_STT_URL, e.g. http://whisper:8000
+  model: "Systran/faster-whisper-medium"  # VOCALA_STT_MODEL; small is faster, less accurate
+  language: "ru"            # VOCALA_STT_LANGUAGE; empty = detect

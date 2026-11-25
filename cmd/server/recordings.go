@@ -56,6 +56,7 @@ func setupRecording() {
 		logger.Error("recording: disabled, %v", err)
 		return
 	}
+	setupTranscription(m, tmpDir)
 	if err := m.RecoverInterrupted(); err != nil {
 		logger.Error("recording: recover interrupted: %v", err)
 	}

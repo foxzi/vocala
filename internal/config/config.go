@@ -9,15 +9,24 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Database  DatabaseConfig  `yaml:"database"`
-	WebRTC    WebRTCConfig    `yaml:"webrtc"`
-	TURN      TURNConfig      `yaml:"turn"`
-	Auth      AuthConfig      `yaml:"auth"`
-	OAuth     OAuthConfig     `yaml:"oauth"`
-	Security  SecurityConfig  `yaml:"security"`
-	Storage   StorageConfig   `yaml:"storage"`
-	Recording RecordingConfig `yaml:"recording"`
+	Server        ServerConfig        `yaml:"server"`
+	Database      DatabaseConfig      `yaml:"database"`
+	WebRTC        WebRTCConfig        `yaml:"webrtc"`
+	TURN          TURNConfig          `yaml:"turn"`
+	Auth          AuthConfig          `yaml:"auth"`
+	OAuth         OAuthConfig         `yaml:"oauth"`
+	Security      SecurityConfig      `yaml:"security"`
+	Storage       StorageConfig       `yaml:"storage"`
+	Recording     RecordingConfig     `yaml:"recording"`
+	Transcription TranscriptionConfig `yaml:"transcription"`
+}
+
+// TranscriptionConfig points to a self-hosted, OpenAI-compatible speech
+// service (speaches). An empty URL turns transcription off.
+type TranscriptionConfig struct {
+	URL      string `yaml:"url"`      // e.g. http://whisper:8000
+	Model    string `yaml:"model"`    // Hugging Face model id
+	Language string `yaml:"language"` // ISO 639-1; empty = autodetect
 }
 
 // StorageConfig selects where finished files (recordings) are kept.
@@ -130,6 +139,10 @@ func Default() *Config {
 			MaxHours:      4,
 			RetentionDays: 30,
 		},
+		Transcription: TranscriptionConfig{
+			Model:    "Systran/faster-whisper-medium",
+			Language: "ru",
+		},
 		Auth: AuthConfig{
 			SessionDays:         30,
 			MinPassword:         8,
@@ -187,6 +200,15 @@ func envOverrides(cfg *Config) {
 	}
 	if v := os.Getenv("VOCALA_COOKIE_SECURE"); v == "true" || v == "1" {
 		cfg.Auth.CookieSecure = true
+	}
+	if v := os.Getenv("VOCALA_STT_URL"); v != "" {
+		cfg.Transcription.URL = v
+	}
+	if v := os.Getenv("VOCALA_STT_MODEL"); v != "" {
+		cfg.Transcription.Model = v
+	}
+	if v, ok := os.LookupEnv("VOCALA_STT_LANGUAGE"); ok {
+		cfg.Transcription.Language = v
 	}
 	if v := os.Getenv("VOCALA_STORAGE_DIR"); v != "" {
 		cfg.Storage.Local.Dir = v

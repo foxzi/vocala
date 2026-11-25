@@ -8,9 +8,19 @@ services:
       - "5349:5349/tcp"
       - "40000-40200:40000-40200/udp"
       - "40201:40201/tcp"
+    environment:
+      # Call transcription: set VOCALA_STT_URL=http://whisper:8000 in .env
+      # and start with `docker compose --profile stt up -d`.
+      VOCALA_STT_URL: ${VOCALA_STT_URL:-}
+      # Empty unless set in .env, so transcription.model in config.yaml
+      # still applies. The language is set in config.yaml (default ru).
+      VOCALA_STT_MODEL: ${VOCALA_STT_MODEL:-}
     volumes:
       - vocala-data:/app/data
       - ./config.yaml:/app/config.yaml:ro
+    networks:
+      - default
+      - speech
     restart: unless-stopped
 
   nginx:
@@ -25,5 +35,37 @@ services:
       - vocala
     restart: unless-stopped
 
+  # Speech recognition for transcripts (docs/adr/0001-recording-and-transcription.md):
+  # speaches with faster-whisper on the CPU, the same setup as the platform's
+  # whisper app. Its port is not published; only vocala reaches it, over the
+  # `speech` network. The model (1.5 GB for medium) is downloaded from
+  # Hugging Face on first start and kept in the whisper-models volume.
+  whisper:
+    profiles: ["stt"]
+    # Pinned: speaches changes its settings between releases.
+    # ghcr.io/speaches-ai/speaches:0.8.3-cpu
+    image: ghcr.io/speaches-ai/speaches@sha256:21e3df06d842fb7802ab470dd77c25f0e8c0d22950e8d8c6ae886e851af53ef8
+    environment:
+      WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8
+      # Half of a 4-core/8-thread server; the rest stays with the calls.
+      WHISPER__CPU_THREADS: "4"
+      # -1: keep the model loaded; reloading would delay the next transcript.
+      WHISPER__TTL: "-1"
+      ENABLE_UI: "false"
+      # debug logs request details
+      LOG_LEVEL: info
+    cpus: 4
+    mem_limit: 4g
+    volumes:
+      - whisper-models:/home/ubuntu/.cache/huggingface/hub
+    networks:
+      - speech
+    restart: unless-stopped
+
+networks:
+  speech:
+
 volumes:
   vocala-data:
+  whisper-models:

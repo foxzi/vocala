@@ -160,6 +160,10 @@ func migrate() {
 			stored INTEGER NOT NULL DEFAULT 0
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_recording_segments_recording ON recording_segments(recording_id)`,
+		// Transcription queue state lives on the recording row.
+		`ALTER TABLE recordings ADD COLUMN transcript_status TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE recordings ADD COLUMN transcript_key TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE recordings ADD COLUMN transcript_attempts INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, q := range migrations {
 		DB.Exec(q) // ignore errors if columns already exist

@@ -70,6 +70,8 @@ type Manager struct {
 	blobs  storage.Blobs
 	cfg    Config
 	notify func(channelID int64, st State)
+	// onRecorded is told about every recording whose audio is in storage.
+	onRecorded func(channelID, recordingID int64)
 
 	mu        sync.RWMutex
 	active    map[int64]*session
@@ -526,6 +528,7 @@ func (m *Manager) complete(s *session) {
 		logger.Error("recording: finish %d: %v", s.id, err)
 	}
 	logger.Info("recording: %d stopped (%s)", s.id, status)
+	m.recorded(s.channelID, s.id)
 }
 
 func (m *Manager) sessionTmpDir(recordingID int64) string {

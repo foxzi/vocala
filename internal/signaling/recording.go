@@ -3,9 +3,12 @@ package signaling
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/foxzi/vocala/internal/channel"
+	"github.com/foxzi/vocala/internal/database"
 	"github.com/foxzi/vocala/internal/logger"
 	"github.com/foxzi/vocala/internal/recording"
 )
@@ -150,4 +153,27 @@ func channelUsersChanged(channelID int64) {
 			logger.Error("signaling: stop recording in empty channel %d: %v", channelID, err)
 		}
 	}
+}
+
+// PostSystemMessage stores a system line in the channel's chat and sends it
+// to everyone who sees that chat, as the huddle notices do.
+func PostSystemMessage(channelID int64, text string) {
+	now := time.Now()
+	id := fmt.Sprintf("sys-rec-%d-%d", channelID, now.UnixNano())
+	if err := database.SaveChatMessage(database.ChatMessage{
+		ID: id, ChannelID: channelID, Username: "Vocala", Text: text, CreatedAt: now.Unix(), Kind: "system",
+	}); err != nil {
+		logger.Error("signaling: save system message in channel %d: %v", channelID, err)
+	}
+	msg, _ := json.Marshal(map[string]any{
+		"type":       "chat_message",
+		"id":         id,
+		"user_id":    0,
+		"username":   "Vocala",
+		"text":       text,
+		"channel_id": channelID,
+		"timestamp":  now.Unix(),
+		"kind":       "system",
+	})
+	GlobalHub.BroadcastChatToChannel(channelID, msg)
 }
