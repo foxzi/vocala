@@ -101,7 +101,7 @@ func (m *Manager) SegmentChannel(recordingID, segmentID int64) (int64, error) {
 	return channelID, err
 }
 
-// OpenSegment returns the segment's audio and its format ("ogg").
+// OpenSegment returns the segment's audio and its format (ogg, webm, mp4).
 func (m *Manager) OpenSegment(ctx context.Context, recordingID, segmentID int64) (io.ReadCloser, string, error) {
 	var key, format string
 	err := m.db.QueryRow(
@@ -192,18 +192,18 @@ func (m *Manager) RecoverInterrupted() error {
 
 	for _, r := range recs {
 		ended := r.startedAt
-		segRows, err := m.db.Query(`SELECT id, started_at_ms, storage_key FROM recording_segments WHERE recording_id = ? AND stored = 0`, r.id)
+		segRows, err := m.db.Query(`SELECT id, started_at_ms, storage_key, format FROM recording_segments WHERE recording_id = ? AND stored = 0`, r.id)
 		if err != nil {
 			return err
 		}
 		type seg struct {
 			id, startedAt int64
-			key           string
+			key, format   string
 		}
 		var segs []seg
 		for segRows.Next() {
 			var s seg
-			if err := segRows.Scan(&s.id, &s.startedAt, &s.key); err == nil {
+			if err := segRows.Scan(&s.id, &s.startedAt, &s.key, &s.format); err == nil {
 				segs = append(segs, s)
 			}
 		}
@@ -211,7 +211,7 @@ func (m *Manager) RecoverInterrupted() error {
 
 		failed := false
 		for _, s := range segs {
-			switch rec, err := m.recoverSegment(r.id, s.id, s.startedAt, s.key); {
+			switch rec, err := m.recoverSegment(r.id, s.id, s.startedAt, s.key, s.format); {
 			case err != nil:
 				logger.Error("recording: recover segment %d: %v", s.id, err)
 				failed = true
@@ -241,12 +241,12 @@ type recovered struct{ end int64 }
 // recoverSegment moves a segment left in the temporary directory to storage.
 // Without a temporary file the crash may have come after the move but
 // before the database noted it: the segment is kept if storage has it.
-func (m *Manager) recoverSegment(recordingID, segmentID, startedAt int64, key string) (recovered, error) {
+func (m *Manager) recoverSegment(recordingID, segmentID, startedAt int64, key, format string) (recovered, error) {
 	if key == "" {
 		_, err := m.db.Exec(`DELETE FROM recording_segments WHERE id = ?`, segmentID)
 		return recovered{}, err
 	}
-	tmp := m.tmpPath(recordingID, segmentID)
+	tmp := m.tmpPath(recordingID, segmentID, format)
 	fi, err := os.Stat(tmp)
 	if err != nil {
 		rc, openErr := m.blobs.Open(context.Background(), key)

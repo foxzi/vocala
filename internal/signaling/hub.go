@@ -8,6 +8,7 @@ import (
 	"github.com/foxzi/vocala/internal/logger"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/foxzi/vocala/internal/auth"
@@ -65,7 +66,7 @@ type Client struct {
 	Send           chan []byte // text JSON messages
 	SendPriority   chan []byte // critical signaling messages (offer/answer/ICE) — must not be dropped
 	SendMedia      chan []byte // binary media frames
-	IsWSMedia      bool        // true if this client uses WS media transport (mobile)
+	wsMedia        atomic.Bool // this client sends audio over WS instead of WebRTC (mobile fallback)
 	IsGuest        bool
 	GuestChannelID int64 // if guest, restrict to this channel only
 }
@@ -523,6 +524,10 @@ func (c *Client) readPump() {
 		}
 
 		if !wsLimiter.Allow() {
+			if msgType == websocket.BinaryMessage && len(raw) > 0 && raw[0] == 0x01 {
+				// A recorded WebM stream cannot skip bytes.
+				mediaChunkLost(c)
+			}
 			continue // drop message silently
 		}
 
@@ -552,6 +557,10 @@ func handleBinaryMedia(c *Client, raw []byte) {
 	chID := channel.GetUserChannel(c.UserID)
 	if chID == 0 {
 		return
+	}
+
+	if raw[0] == 0x01 {
+		recordMediaChunk(c, chID, raw[1:])
 	}
 
 	// Build relay frame: [1 byte type][8 bytes userID][payload]
@@ -911,8 +920,16 @@ func handleMessage(c *Client, msg Message) {
 		handleRecordingStop(c)
 
 	case "ws_media_mode":
-		c.IsWSMedia = true
+		c.wsMedia.Store(true)
 		logger.Debug("signaling: user %d switched to WS media transport", c.UserID)
+
+	case "ws_media_stream":
+		var p struct {
+			MIME string `json:"mime"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			startMediaStream(c, p.MIME)
+		}
 
 	case "chat_message":
 		var p struct {
@@ -1430,7 +1447,10 @@ func handleMessage(c *Client, msg Message) {
 	}
 }
 
+// cleanupWebRTC ends a user's media in a call they are leaving: their SFU
+// peer and their WebSocket audio file, if the call is being recorded.
 func cleanupWebRTC(channelID int64, userID int64) {
+	endMediaStream(channelID, userID)
 	sfu := rtc.GetSFU(channelID)
 	if sfu == nil {
 		return

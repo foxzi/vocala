@@ -3,6 +3,7 @@ package signaling
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 
 	"github.com/foxzi/vocala/internal/channel"
 	"github.com/foxzi/vocala/internal/logger"
@@ -18,7 +19,67 @@ func SetRecorder(m *recording.Manager) {
 	recorder = m
 	m.OnStateChange(func(channelID int64, st recording.State) {
 		GlobalHub.BroadcastToChannel(channelID, recordingStateMessage(channelID, st))
+		if st.Active {
+			restartWSMedia(channelID)
+		}
 	})
+}
+
+// restartWSMedia asks the channel's WebSocket-audio clients to restart
+// their MediaRecorder. Only the first chunk of a MediaRecorder stream holds
+// the container header, so a recording that starts mid-stream needs a new
+// one. Participants who join later start a fresh recorder anyway.
+func restartWSMedia(channelID int64) {
+	msg, _ := json.Marshal(map[string]any{"type": "ws_media_restart"})
+	for _, u := range channel.GetUsers(channelID) {
+		GlobalHub.mu.RLock()
+		c := GlobalHub.clients[u.ID]
+		GlobalHub.mu.RUnlock()
+		if c != nil && c.wsMedia.Load() {
+			GlobalHub.SendToPriority(u.ID, msg)
+		}
+	}
+}
+
+// mediaStreamKey identifies a user's WebSocket audio stream to the
+// recorder. A user has one connection at a time (Hub.Register), and a
+// reconnect announces a new stream anyway, so the user id is enough.
+func mediaStreamKey(userID int64) string {
+	return "ws-" + strconv.FormatInt(userID, 10)
+}
+
+// startMediaStream tells the recorder that the client's next audio chunk
+// begins a new MediaRecorder stream. The client sends this before the
+// stream's first chunk on the same connection, so the order holds.
+func startMediaStream(c *Client, mime string) {
+	chID := channel.GetUserChannel(c.UserID)
+	format := recording.FormatForMIME(mime)
+	if recorder == nil || chID == 0 || format == "" {
+		return
+	}
+	recorder.MediaStreamStarted(chID, mediaStreamKey(c.UserID), format)
+}
+
+// recordMediaChunk hands a WebSocket audio chunk to the recorder.
+func recordMediaChunk(c *Client, channelID int64, chunk []byte) {
+	if recorder != nil {
+		recorder.MediaChunk(channelID, c.UserID, c.Username, mediaStreamKey(c.UserID), chunk)
+	}
+}
+
+// mediaChunkLost tells the recorder that one of the client's audio chunks
+// was dropped before it got there.
+func mediaChunkLost(c *Client) {
+	if chID := channel.GetUserChannel(c.UserID); recorder != nil && chID != 0 {
+		recorder.MediaChunkLost(chID, mediaStreamKey(c.UserID))
+	}
+}
+
+// endMediaStream closes the user's WebSocket audio file, if any.
+func endMediaStream(channelID, userID int64) {
+	if recorder != nil {
+		recorder.MediaStreamEnded(channelID, mediaStreamKey(userID))
+	}
 }
 
 func recordingStateMessage(channelID int64, st recording.State) []byte {

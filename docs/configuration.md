@@ -75,7 +75,7 @@ Env vars override YAML settings:
 
 Any participant can start recording a call with the record button; everyone in the call sees a "REC" indicator, and people who join later are told the call is being recorded. The server writes each participant's audio to its own Ogg/Opus file without re-encoding. Recording stops when someone presses the button again, when the last participant leaves, or after `max_hours`. Channel members find recordings under **Recordings** in the channel header. Design: [ADR-0001](adr/0001-recording-and-transcription.md).
 
-Not recorded yet: the WebSocket audio fallback (an Android client that joined without a microphone and turned it on later). Regular Android calls use WebRTC and are recorded.
+Regular Android calls use WebRTC like everyone else. An Android client that joined without a microphone and turned it on later sends audio over WebSocket as MediaRecorder chunks instead; that audio is stored as WebM as it arrives (the browser player shows no total length for these files). When a recording starts, the server asks these clients to restart their recorder, because only the start of a stream carries the container header; the client announces each new stream (`ws_media_stream`) before its first chunk.
 
 ### Examples
 
@@ -186,7 +186,7 @@ Vocala настраивается через файл `config.yaml` и/или п
 
 Запись включает любой участник кнопкой записи; у всех в звонке горит индикатор «REC», а вошедшим позже сообщается, что идёт запись. Сервер пишет звук каждого участника в свой файл Ogg/Opus без перекодирования. Запись останавливается кнопкой, когда звонок покинул последний участник, или через `max_hours`. Записи канала — кнопка **Recordings** в шапке канала. Решение — [ADR-0001](adr/0001-recording-and-transcription.md).
 
-Пока не записывается запасной путь через WebSocket (Android-клиент вошёл без микрофона и включил его позже). Обычные звонки с Android идут через WebRTC и записываются.
+Обычные звонки с Android идут через WebRTC, как у всех. Если Android-клиент вошёл без микрофона и включил его позже, звук идёт кусками MediaRecorder по WebSocket; он сохраняется в WebM как есть (у таких файлов проигрыватель не показывает общую длину). При старте записи сервер просит такие клиенты перезапустить MediaRecorder: заголовок контейнера есть только в начале потока; о каждом новом потоке клиент сообщает (`ws_media_stream`) перед его первым куском.
 
 ### Примеры
 

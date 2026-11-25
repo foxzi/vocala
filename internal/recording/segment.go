@@ -1,6 +1,8 @@
 package recording
 
 import (
+	"os"
+	"strings"
 	"time"
 
 	"github.com/pion/rtp"
@@ -20,8 +22,34 @@ const (
 // opusSilence is a 20 ms CELT frame of silence, the one browsers send.
 var opusSilence = []byte{0xF8, 0xFF, 0xFE}
 
-// segment is one participant's continuous audio, written as Ogg/Opus to a
-// temporary file until it is finished and moved to storage.
+// Segment file formats. WebRTC audio is written as Ogg; audio that mobile
+// clients send over WebSocket arrives already packed by MediaRecorder and
+// is stored in its own container.
+const (
+	formatOgg  = "ogg"
+	formatWebM = "webm"
+	formatMP4  = "mp4"
+)
+
+// mediaRecorderTimeslice is how much audio one WebSocket chunk carries
+// (MediaRecorder.start(60) in app.js); it closes the last chunk's duration.
+const mediaRecorderTimeslice = 60 * time.Millisecond
+
+// FormatForMIME maps a MediaRecorder MIME type to a segment format, or ""
+// for a container the recorder does not store.
+func FormatForMIME(mime string) string {
+	switch {
+	case strings.HasPrefix(mime, "audio/webm"):
+		return formatWebM
+	case strings.HasPrefix(mime, "audio/mp4"):
+		return formatMP4
+	}
+	return ""
+}
+
+// segment is one participant's continuous audio, written to a temporary
+// file until it is finished and moved to storage: Ogg/Opus built from RTP
+// packets, or MediaRecorder chunks appended as they come.
 //
 // The Ogg writer advances time by the samples it is given, not by RTP
 // timestamps, so lost packets would make the file shorter than the call and
@@ -34,7 +62,12 @@ type segment struct {
 	key       string
 	tmpPath   string
 	startedAt time.Time
-	w         *oggwriter.OggWriter
+	format    string
+
+	ogg *oggwriter.OggWriter // formatOgg
+
+	file   *os.File  // MediaRecorder formats
+	lastAt time.Time // arrival of the last chunk
 
 	hasTS       bool
 	firstTS     uint32
@@ -43,12 +76,34 @@ type segment struct {
 	filled      int    // silence frames inserted for lost packets
 }
 
-func openSegment(id, userID int64, name, key, tmpPath string, startedAt time.Time) (*segment, error) {
-	w, err := oggwriter.New(tmpPath, opusClockRate, 2)
+func openSegment(id, userID int64, name, key, tmpPath, format string, startedAt time.Time) (*segment, error) {
+	s := &segment{id: id, userID: userID, name: name, key: key, tmpPath: tmpPath, startedAt: startedAt, format: format}
+	var err error
+	if format == formatOgg {
+		s.ogg, err = oggwriter.New(tmpPath, opusClockRate, 2)
+	} else {
+		s.file, err = os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return &segment{id: id, userID: userID, name: name, key: key, tmpPath: tmpPath, startedAt: startedAt, w: w}, nil
+	return s, nil
+}
+
+// appendChunk adds a MediaRecorder chunk that arrived at time at.
+func (s *segment) appendChunk(chunk []byte, at time.Time) error {
+	if _, err := s.file.Write(chunk); err != nil {
+		return err
+	}
+	s.lastAt = at
+	return nil
+}
+
+func (s *segment) close() error {
+	if s.ogg != nil {
+		return s.ogg.Close()
+	}
+	return s.file.Close()
 }
 
 // breaksAt reports whether pkt cannot continue this file: after a long
@@ -73,7 +128,7 @@ func (s *segment) write(pkt *rtp.Packet) error {
 			return err
 		}
 	}
-	if err := s.w.WriteRTP(pkt); err != nil {
+	if err := s.ogg.WriteRTP(pkt); err != nil {
 		return err
 	}
 	if !s.hasTS {
@@ -96,7 +151,7 @@ func (s *segment) fillGap(delta uint32) error {
 			Header:  rtp.Header{Version: 2, Timestamp: s.lastTS + s.lastSamples},
 			Payload: opusSilence,
 		}
-		if err := s.w.WriteRTP(silence); err != nil {
+		if err := s.ogg.WriteRTP(silence); err != nil {
 			return err
 		}
 		s.lastTS += s.lastSamples
@@ -107,6 +162,13 @@ func (s *segment) fillGap(delta uint32) error {
 }
 
 func (s *segment) duration() time.Duration {
+	if s.format != formatOgg {
+		if s.lastAt.IsZero() {
+			return 0
+		}
+		// startedAt is when the first chunk's audio began (see writeChunk).
+		return s.lastAt.Sub(s.startedAt)
+	}
 	if !s.hasTS {
 		return 0
 	}
