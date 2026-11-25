@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/foxzi/vocala/internal/channel"
@@ -34,13 +37,13 @@ func setupRecording() {
 	}
 	// A misconfigured recording must not keep the server from starting
 	// (e.g. after an upgrade): calls work, recording stays off.
-	if cfg.Storage.Backend != "" && cfg.Storage.Backend != "local" {
-		logger.Error("recording: disabled, unknown storage backend %q (supported: local)", cfg.Storage.Backend)
-		return
-	}
 	dir := storageDir()
-	blobs, err := storage.NewLocal(dir)
-	if err != nil {
+	blobs, where, err := openStorage(dir)
+	if errors.Is(err, storage.ErrUnreachable) {
+		// Probably starting together with us: uploads retry, and what
+		// fails meanwhile is uploaded again later.
+		logger.Warn("recording: storage not reachable yet, recordings will be uploaded when it is: %v", err)
+	} else if err != nil {
 		logger.Error("recording: disabled, %v", err)
 		return
 	}
@@ -57,13 +60,28 @@ func setupRecording() {
 		return
 	}
 	setupTranscription(m, tmpDir)
-	if err := m.RecoverInterrupted(); err != nil {
-		logger.Error("recording: recover interrupted: %v", err)
+	// Which recordings were interrupted is decided now, before new ones can
+	// start; moving their files to storage (maybe slow S3) goes on in the
+	// background, with uploads a storage outage left behind.
+	interrupted, err := m.InterruptedRecordings()
+	if err != nil {
+		logger.Error("recording: find interrupted: %v", err)
 	}
+	go func() {
+		if err := m.RecoverRecordings(interrupted); err != nil {
+			logger.Error("recording: recover interrupted: %v", err)
+		}
+		for {
+			if err := m.RetryFailedUploads(); err != nil {
+				logger.Error("recording: retry uploads: %v", err)
+			}
+			time.Sleep(10 * time.Minute)
+		}
+	}()
 	recorder = m
 	rtc.SetAudioRecorder(m)
 	signaling.SetRecorder(m)
-	logger.Info("recording: enabled, files in %s", dir)
+	logger.Info("recording: enabled, files in %s", where)
 
 	if days := cfg.Recording.RetentionDays; days > 0 {
 		go func() {
@@ -77,6 +95,27 @@ func setupRecording() {
 			}
 		}()
 	}
+}
+
+// openStorage opens the configured backend. Files being written stay on
+// the local disk (tmp under dir) whatever the backend.
+func openStorage(dir string) (storage.Blobs, string, error) {
+	switch cfg.Storage.Backend {
+	case "", "local":
+		blobs, err := storage.NewLocal(dir)
+		return blobs, dir, err
+	case "s3":
+		s3 := cfg.Storage.S3
+		// Short: the server waits for this before it accepts calls.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		blobs, err := storage.NewS3(ctx, storage.S3Config{
+			Endpoint: s3.Endpoint, Region: s3.Region, Bucket: s3.Bucket, Prefix: s3.Prefix,
+			AccessKey: s3.AccessKey, SecretKey: s3.SecretKey, Insecure: s3.Insecure,
+		})
+		return blobs, "s3://" + s3.Bucket + "/" + strings.Trim(s3.Prefix, "/"), err
+	}
+	return nil, "", fmt.Errorf("unknown storage backend %q (supported: local, s3)", cfg.Storage.Backend)
 }
 
 // storageDir is storage.local.dir, or "storage" next to the database so

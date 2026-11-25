@@ -66,9 +66,17 @@ security:
 
 # Where finished files (call recordings) are kept.
 storage:
-  backend: "local"          # only "local" for now; S3 is planned
+  backend: "local"          # "local" or "s3" (VOCALA_STORAGE_BACKEND)
   local:
     dir: ""                 # VOCALA_STORAGE_DIR; empty = "storage" next to the database file
+  s3:                       # any S3-compatible storage; the bucket must exist
+    endpoint: ""            # host[:port] without scheme, e.g. storage.yandexcloud.net
+    region: ""              # empty for most non-AWS services
+    bucket: ""
+    prefix: "vocala/"       # folder inside the bucket
+    access_key: ""          # better: VOCALA_S3_ACCESS_KEY
+    secret_key: ""          # better: VOCALA_S3_SECRET_KEY
+    insecure: false         # true = plain HTTP (storage on the local network)
 
 # Server-side call recording: one Ogg/Opus file per participant.
 recording:

@@ -31,8 +31,22 @@ type TranscriptionConfig struct {
 
 // StorageConfig selects where finished files (recordings) are kept.
 type StorageConfig struct {
-	Backend string             `yaml:"backend"` // "local" (S3 later)
+	Backend string             `yaml:"backend"` // "local" or "s3"
 	Local   LocalStorageConfig `yaml:"local"`
+	S3      S3StorageConfig    `yaml:"s3"`
+}
+
+// S3StorageConfig points to a bucket in any S3-compatible storage. Keys are
+// better passed as VOCALA_S3_ACCESS_KEY / VOCALA_S3_SECRET_KEY than kept in
+// the file.
+type S3StorageConfig struct {
+	Endpoint  string `yaml:"endpoint"` // host[:port], no scheme
+	Region    string `yaml:"region"`
+	Bucket    string `yaml:"bucket"`
+	Prefix    string `yaml:"prefix"`
+	AccessKey string `yaml:"access_key"`
+	SecretKey string `yaml:"secret_key"`
+	Insecure  bool   `yaml:"insecure"` // plain HTTP
 }
 
 type LocalStorageConfig struct {
@@ -133,6 +147,7 @@ func Default() *Config {
 		},
 		Storage: StorageConfig{
 			Backend: "local",
+			S3:      S3StorageConfig{Prefix: "vocala/"},
 		},
 		Recording: RecordingConfig{
 			Enabled:       true,
@@ -209,6 +224,26 @@ func envOverrides(cfg *Config) {
 	}
 	if v, ok := os.LookupEnv("VOCALA_STT_LANGUAGE"); ok {
 		cfg.Transcription.Language = v
+	}
+	if v := os.Getenv("VOCALA_STORAGE_BACKEND"); v != "" {
+		cfg.Storage.Backend = v
+	}
+	for env, dst := range map[string]*string{
+		"VOCALA_S3_ENDPOINT":   &cfg.Storage.S3.Endpoint,
+		"VOCALA_S3_REGION":     &cfg.Storage.S3.Region,
+		"VOCALA_S3_BUCKET":     &cfg.Storage.S3.Bucket,
+		"VOCALA_S3_PREFIX":     &cfg.Storage.S3.Prefix,
+		"VOCALA_S3_ACCESS_KEY": &cfg.Storage.S3.AccessKey,
+		"VOCALA_S3_SECRET_KEY": &cfg.Storage.S3.SecretKey,
+	} {
+		if v := os.Getenv(env); v != "" {
+			*dst = v
+		}
+	}
+	if v := os.Getenv("VOCALA_S3_INSECURE"); v == "true" || v == "1" {
+		cfg.Storage.S3.Insecure = true
+	} else if v == "false" || v == "0" {
+		cfg.Storage.S3.Insecure = false
 	}
 	if v := os.Getenv("VOCALA_STORAGE_DIR"); v != "" {
 		cfg.Storage.Local.Dir = v

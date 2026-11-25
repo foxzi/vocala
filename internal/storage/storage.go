@@ -86,13 +86,23 @@ func (l *Local) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-// path maps a key to a file under Dir and rejects keys that would escape it.
+// path maps a key to a file under Dir.
 func (l *Local) path(key string) (string, error) {
+	clean, err := cleanKey(key)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(l.Dir, filepath.FromSlash(clean)), nil
+}
+
+// cleanKey normalizes a key ("a/b.ogg") and rejects one that would escape
+// the storage root.
+func cleanKey(key string) (string, error) {
 	clean := path.Clean("/" + key)
 	if key == "" || clean == "/" || strings.Contains(key, "..") || strings.Contains(key, "\\") {
 		return "", fmt.Errorf("storage: invalid key %q", key)
 	}
-	return filepath.Join(l.Dir, filepath.FromSlash(clean)), nil
+	return strings.TrimPrefix(clean, "/"), nil
 }
 
 func copyFile(src, dst string) error {

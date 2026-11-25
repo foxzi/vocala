@@ -44,9 +44,17 @@ security:
   allowed_origins: []       # Empty = same-origin only
 
 storage:
-  backend: "local"          # only "local" for now; S3 is planned
+  backend: "local"          # "local" or "s3"
   local:
     dir: ""                 # empty = "storage" next to the database file
+  s3:                       # any S3-compatible storage; the bucket must exist
+    endpoint: ""            # host[:port], no scheme
+    region: ""
+    bucket: ""
+    prefix: "vocala/"
+    access_key: ""          # prefer VOCALA_S3_ACCESS_KEY
+    secret_key: ""          # prefer VOCALA_S3_SECRET_KEY
+    insecure: false         # plain HTTP
 
 recording:
   enabled: true             # server-side call recording
@@ -74,6 +82,10 @@ Env vars override YAML settings:
 | `VOCALA_COOKIE_SECURE` | `false` | Set `true` or `1` for HTTPS |
 | `VOCALA_REGISTRATION` | `true` | Set `false` or `0` to disable public registration |
 | `VOCALA_STORAGE_DIR` | *(next to the DB)* | Directory for recordings |
+| `VOCALA_STORAGE_BACKEND` | `local` | `local` or `s3` |
+| `VOCALA_S3_ENDPOINT`, `VOCALA_S3_BUCKET`, `VOCALA_S3_PREFIX`, `VOCALA_S3_REGION` | | S3 location |
+| `VOCALA_S3_ACCESS_KEY`, `VOCALA_S3_SECRET_KEY` | | S3 keys |
+| `VOCALA_S3_INSECURE` | `false` | `true` for plain HTTP |
 | `VOCALA_RECORDING` | `true` | Set `false` or `0` to disable call recording |
 | `VOCALA_STT_URL` | *(disabled)* | Speech service for transcripts, e.g. `http://whisper:8000` |
 | `VOCALA_STT_MODEL` | `Systran/faster-whisper-medium` | Whisper model |
@@ -159,6 +171,12 @@ SQLite database is created automatically on first run. WAL mode is enabled for c
 
 ---
 
+### Storage
+
+Recordings and transcripts go to `storage.backend`: a local directory (default) or any S3-compatible storage — AWS S3, Yandex Object Storage, Selectel, MinIO, SeaweedFS, Garage. The bucket must exist; Vocala checks it at startup, and if it is unreachable, recording turns off with an error in the log while calls keep working. Files being recorded are written to the local disk first (`recording.tmp_dir`) and uploaded when a participant's track ends. If the storage is down at that moment, the upload is retried for a few minutes; after that the recording is marked failed, the file stays on disk and is uploaded again every 10 minutes until it succeeds. Playback reads the object with range requests, so seeking works. The default prefix is `vocala/`; an endpoint given as a URL (`https://…`) is accepted.
+
+Switching the backend does not move existing recordings: they stay in the old place and are not shown as playable until retention removes their rows. Copy them to the new storage under the same keys (`recordings/<id>/...`) if you need them.
+
 ### Transcripts
 
 With `transcription.url` set, every finished recording is transcribed by a self-hosted speech service — [speaches](https://github.com/speaches-ai/speaches) with faster-whisper on the CPU, the same setup as our platform. Each participant's track is recognized separately, so the transcript knows who spoke; the lines are laid out on the call's timeline (`[00:01:23] Ivan: …`). One recording at a time, in the background; when it is done, the channel chat gets a notice and **Recordings** shows the text and a `.md` download.
@@ -194,6 +212,10 @@ Vocala настраивается через файл `config.yaml` и/или п
 | `VOCALA_COOKIE_SECURE` | `false` | `true` или `1` для HTTPS |
 | `VOCALA_REGISTRATION` | `true` | `false` или `0`, чтобы отключить публичную регистрацию |
 | `VOCALA_STORAGE_DIR` | *(рядом с БД)* | Каталог для записей |
+| `VOCALA_STORAGE_BACKEND` | `local` | `local` или `s3` |
+| `VOCALA_S3_ENDPOINT`, `VOCALA_S3_BUCKET`, `VOCALA_S3_PREFIX`, `VOCALA_S3_REGION` | | Где лежат записи в S3 |
+| `VOCALA_S3_ACCESS_KEY`, `VOCALA_S3_SECRET_KEY` | | Ключи S3 |
+| `VOCALA_S3_INSECURE` | `false` | `true` — обычный HTTP |
 | `VOCALA_RECORDING` | `true` | `false` или `0`, чтобы выключить запись звонков |
 | `VOCALA_STT_URL` | *(выключено)* | Сервис распознавания для расшифровок, например `http://whisper:8000` |
 | `VOCALA_STT_MODEL` | `Systran/faster-whisper-medium` | Модель Whisper |
@@ -237,6 +259,12 @@ SQLite создаётся автоматически при первом зап�
 - Протухшие сессии автоматически очищаются каждый час
 - Токены -- 64-символьные hex-строки (32 байта энтропии)
 - Guest-сессии используют отдельную временную cookie, привязаны к одному каналу и создаются из ссылок `/guest/{token}`
+
+### Хранилище
+
+Записи и расшифровки лежат там, где указывает `storage.backend`: в локальном каталоге (по умолчанию) или в любом S3-совместимом хранилище — AWS S3, Yandex Object Storage, Selectel, MinIO, SeaweedFS, Garage. Бакет должен существовать; Vocala проверяет его при старте, и если он недоступен, запись выключается с ошибкой в логе, а звонки работают. Пока идёт запись, файлы пишутся на локальный диск (`recording.tmp_dir`) и выгружаются, когда заканчивается дорожка участника. Если хранилище в этот момент недоступно, выгрузка повторяется несколько минут; не вышло — запись помечается как сбойная, файл остаётся на диске и догружается раз в 10 минут, пока не получится. Воспроизведение читает объект запросами с Range, поэтому перемотка работает. Префикс по умолчанию — `vocala/`; endpoint можно указать и как URL (`https://…`).
+
+Смена хранилища не переносит старые записи: они остаются на прежнем месте, и проиграть их нельзя, пока строки не удалит срок хранения. Если они нужны — скопируйте их в новое хранилище под теми же ключами (`recordings/<id>/...`).
 
 ### Расшифровки
 
