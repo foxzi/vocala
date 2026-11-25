@@ -668,6 +668,7 @@ func TestDiskErrorRetriesAfterAWhile(t *testing.T) {
 	talk(t, f.m, 7, 1, "alice", "a", 0, 50)
 	time.Sleep(200 * time.Millisecond) // the writer tries and fails
 	os.Remove(blocker)
+	removed := time.Now()
 	time.Sleep(100 * time.Millisecond) // past diskRetry
 	talk(t, f.m, 7, 1, "alice", "a", 5*48000, 50)
 
@@ -681,6 +682,12 @@ func TestDiskErrorRetriesAfterAWhile(t *testing.T) {
 	}
 	if rec.Status != StatusReady || len(rec.Segments) != 1 {
 		t.Fatalf("status %s with %d segments, want ready with the audio after the error", rec.Status, len(rec.Segments))
+	}
+	// The file was opened after the disk recovered: the first batch really
+	// hit the error (a slow writer would have opened it before).
+	if rec.Segments[0].StartedAt < removed.UnixMilli() {
+		t.Fatalf("segment started %d ms before the disk recovered: the error path never ran",
+			removed.UnixMilli()-rec.Segments[0].StartedAt)
 	}
 }
 

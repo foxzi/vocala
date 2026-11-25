@@ -58,14 +58,22 @@ func TestRecordingSurvivesShortEmptyChannel(t *testing.T) {
 		t.Fatal("recording stopped although alice came back in time")
 	}
 
-	// Leaving again restarts the wait; staying away stops it.
+	// Leave, come back and leave again within the grace: the wait counts
+	// from the last leave, the first one's timer must not stop it.
+	firstLeave := time.Now()
 	channel.Leave(1)
 	channelUsersChanged(ch)
 	time.Sleep(100 * time.Millisecond)
+	channel.Join(ch, 1, "alice")
+	channelUsersChanged(ch)
+	time.Sleep(100 * time.Millisecond)
+	channel.Leave(1)
+	channelUsersChanged(ch)
+	time.Sleep(time.Until(firstLeave.Add(emptyGrace + 100*time.Millisecond)))
 	if !m.State(ch).Active {
-		t.Fatal("recording stopped before the grace ran out")
+		t.Fatal("the first leave's timer stopped the recording; the wait must restart")
 	}
-	time.Sleep(700 * time.Millisecond)
+	time.Sleep(500 * time.Millisecond)
 	if m.State(ch).Active {
 		t.Fatal("recording still running in a channel empty for longer than the grace")
 	}

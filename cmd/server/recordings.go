@@ -129,7 +129,8 @@ func storageDir() string {
 	return filepath.Join(filepath.Dir(cfg.Database.Path), "storage")
 }
 
-// canSeeRecording: admins, whoever may join the recording's channel, and
+// canSeeRecording: admins (every recording, DM calls included: decided
+// 25.11.2026), whoever may join the recording's channel, and
 // the recording's participants (a track in it, or started it). The last
 // keeps recordings of group calls reachable after the channel is removed.
 func canSeeRecording(user *auth.User, recordingID, channelID int64) (bool, error) {
@@ -139,10 +140,12 @@ func canSeeRecording(user *auth.User, recordingID, channelID int64) (bool, error
 	return recorder.IsParticipant(recordingID, user.ID)
 }
 
-// handleRecordings lists a channel's recordings, or with mine=1 the
-// recordings the user took part in, in any channel:
+// handleRecordings lists a channel's recordings, with mine=1 the
+// recordings the user took part in, in any channel, and with all=1 (admins)
+// every recording:
 // GET /api/recordings?channel_id=N
 // GET /api/recordings?mine=1
+// GET /api/recordings?all=1
 func handleRecordings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -155,15 +158,23 @@ func handleRecordings(w http.ResponseWriter, r *http.Request) {
 	user := userFromContext(r)
 	var list []recording.Recording
 	var err error
-	if r.URL.Query().Get("mine") == "1" {
+	switch {
+	case r.URL.Query().Get("all") == "1":
+		if !user.IsAdmin {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		list, err = recorder.ListAll(recordingsListLimit)
+	case r.URL.Query().Get("mine") == "1":
 		list, err = recorder.ListForUser(user.ID, recordingsListLimit)
-	} else {
+	default:
 		chID, perr := strconv.ParseInt(r.URL.Query().Get("channel_id"), 10, 64)
 		if perr != nil || chID <= 0 {
 			http.Error(w, "invalid channel_id", http.StatusBadRequest)
 			return
 		}
-		if !channel.CanJoin(chID, user.ID, user.IsAdmin) {
+		// Admins see every recording, DM calls included (canSeeRecording).
+		if !user.IsAdmin && !channel.CanJoin(chID, user.ID, false) {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -222,7 +233,7 @@ func handleRecordingAudio(w http.ResponseWriter, r *http.Request) {
 	etag := `"seg-` + strconv.FormatInt(segID, 10) + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "private, max-age=86400")
-	if r.Header.Get("If-None-Match") == etag {
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -252,4 +263,16 @@ func handleRecordingAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	io.Copy(w, rc)
+}
+
+// etagMatches reports whether an If-None-Match header names etag: a list,
+// a weak tag (W/"…") or "*" count, as in http.ServeContent.
+func etagMatches(header, etag string) bool {
+	for _, tag := range strings.Split(header, ",") {
+		tag = strings.TrimPrefix(strings.TrimSpace(tag), "W/")
+		if tag == etag || tag == "*" {
+			return true
+		}
+	}
+	return false
 }

@@ -173,6 +173,10 @@ async function openRecordings(channelID) {
         <div class="bg-vc-sidebar border border-vc-border rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col">
             <div class="px-5 py-3 border-b border-vc-border flex items-center">
                 <h3 class="font-semibold text-vc-text">${mine ? 'My recordings' : 'Recordings'}</h3>
+                ${mine && window.VOCALA_IS_ADMIN ? `<div class="ml-3 flex text-xs rounded-lg border border-vc-border overflow-hidden">
+                    <button data-scope="mine=1" class="px-2 py-1 bg-vc-hover text-vc-text">Mine</button>
+                    <button data-scope="all=1" class="px-2 py-1 text-vc-muted hover:text-vc-text" title="Every recording on the server (admin)">All</button>
+                </div>` : ''}
                 <button data-act="close" class="ml-auto text-vc-muted hover:text-vc-text transition" title="Close">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
@@ -193,6 +197,19 @@ async function openRecordings(channelID) {
     const body = modal.querySelector('#recordings-body');
     body.dataset.query = mine ? 'mine=1' : `channel_id=${encodeURIComponent(channelID)}`;
     body.dataset.mine = mine ? '1' : '';
+    // Admins switch My recordings to every recording on the server.
+    modal.querySelectorAll('[data-scope]').forEach(btn => btn.addEventListener('click', () => {
+        modal.querySelectorAll('[data-scope]').forEach(b => {
+            const on = b === btn;
+            b.classList.toggle('bg-vc-hover', on);
+            b.classList.toggle('text-vc-text', on);
+            b.classList.toggle('text-vc-muted', !on);
+        });
+        modal.querySelector('h3').textContent = btn.dataset.scope === 'all=1' ? 'All recordings' : 'My recordings';
+        body.dataset.query = btn.dataset.scope;
+        body.textContent = 'Loading…';
+        refreshRecordings(body);
+    }));
     try {
         const res = await fetch(`/api/recordings?${body.dataset.query}`, { credentials: 'same-origin' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -213,7 +230,9 @@ function renderRecordingsList(body, recordings) {
     }
     const mine = !!body.dataset.mine;
     if (!recordings.length) {
-        body.textContent = mine
+        body.textContent = body.dataset.query === 'all=1'
+            ? 'No recordings on this server.'
+            : mine
             ? 'No recordings with you yet. Recordings you started or spoke in appear here.'
             : 'No recordings yet. Start one with the record button in a call.';
         return;

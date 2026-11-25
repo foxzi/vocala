@@ -111,6 +111,11 @@ func (m *Manager) list(where string, args ...any) ([]Recording, error) {
 	return out, nil
 }
 
+// ListAll returns every recording on the server, for admins.
+func (m *Manager) ListAll(limit int) ([]Recording, error) {
+	return m.list(``, limit)
+}
+
 // IsParticipant reports whether the user started the recording or has a
 // track in it. Such a user keeps access when the channel is gone or they
 // are no longer its member.

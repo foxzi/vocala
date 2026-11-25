@@ -130,7 +130,14 @@ func (m *Manager) restartStreamLater(s *session, userID int64) {
 	if m.onStreamBroken == nil {
 		return
 	}
-	time.AfterFunc(diskRetry, func() { m.onStreamBroken(s.channelID, userID) })
+	time.AfterFunc(diskRetry, func() {
+		m.mu.RLock()
+		live := m.active[s.channelID] == s
+		m.mu.RUnlock()
+		if live { // not after the recording ended
+			m.onStreamBroken(s.channelID, userID)
+		}
+	})
 }
 
 // event is an RTP packet, a MediaRecorder chunk or the end of a track, on

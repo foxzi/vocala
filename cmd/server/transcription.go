@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/foxzi/vocala/internal/channel"
 	"github.com/foxzi/vocala/internal/logger"
 	"github.com/foxzi/vocala/internal/recording"
 	"github.com/foxzi/vocala/internal/signaling"
@@ -41,8 +42,10 @@ func setupTranscription(m *recording.Manager, tmpDir string) {
 	w.OnReady(func(r recording.Recording) {
 		// No clock time here: the server's time zone (UTC in Docker) is not
 		// the readers'.
-		if r.ChannelKind == "deleted" {
-			return // the participants find it in My recordings
+		// Checked now: a long call takes longer to transcribe than a group
+		// call's channel lives.
+		if _, err := channel.GetByID(r.ChannelID); err != nil {
+			return // gone; the participants find it in My recordings
 		}
 		signaling.PostSystemMessage(r.ChannelID, fmt.Sprintf("📝 Transcript of the recording started by %s is ready — see Recordings", r.StartedBy))
 	})
