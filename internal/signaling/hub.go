@@ -8,6 +8,7 @@ import (
 	"github.com/foxzi/vocala/internal/logger"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/foxzi/vocala/internal/auth"
@@ -65,7 +66,8 @@ type Client struct {
 	Send           chan []byte // text JSON messages
 	SendPriority   chan []byte // critical signaling messages (offer/answer/ICE) — must not be dropped
 	SendMedia      chan []byte // binary media frames
-	IsWSMedia      bool        // true if this client uses WS media transport (mobile)
+	wsMedia        atomic.Bool // this client sends audio over WS instead of WebRTC (mobile)
+	mediaKey       string      // identifies this connection's WS audio stream to the recorder
 	IsGuest        bool
 	GuestChannelID int64 // if guest, restrict to this channel only
 }
@@ -379,6 +381,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			Send:         make(chan []byte, 1024),
 			SendPriority: make(chan []byte, 64),
 			SendMedia:    make(chan []byte, 64),
+			mediaKey:     newMediaKey(),
 		}
 	} else {
 		// Try guest session (cookie or query param for mobile compatibility)
@@ -417,6 +420,7 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			Send:           make(chan []byte, 1024),
 			SendPriority:   make(chan []byte, 64),
 			SendMedia:      make(chan []byte, 64),
+			mediaKey:       newMediaKey(),
 		}
 	}
 
@@ -501,6 +505,7 @@ func (c *Client) readPump() {
 		}
 		chID := channel.Leave(c.UserID)
 		if chID > 0 {
+			endMediaStream(c, chID)
 			cleanupWebRTC(chID, c.UserID)
 			clearPreviewIfSharer(chID, c.UserID)
 			channelUsersChanged(chID)
@@ -552,6 +557,10 @@ func handleBinaryMedia(c *Client, raw []byte) {
 	chID := channel.GetUserChannel(c.UserID)
 	if chID == 0 {
 		return
+	}
+
+	if raw[0] == 0x01 {
+		recordMediaChunk(c, chID, raw[1:])
 	}
 
 	// Build relay frame: [1 byte type][8 bytes userID][payload]
@@ -911,7 +920,15 @@ func handleMessage(c *Client, msg Message) {
 		handleRecordingStop(c)
 
 	case "ws_media_mode":
-		c.IsWSMedia = true
+		c.wsMedia.Store(true)
+
+	case "ws_media_stream":
+		var p struct {
+			MIME string `json:"mime"`
+		}
+		if err := json.Unmarshal(msg.Payload, &p); err == nil {
+			startMediaStream(c, p.MIME)
+		}
 		logger.Debug("signaling: user %d switched to WS media transport", c.UserID)
 
 	case "chat_message":

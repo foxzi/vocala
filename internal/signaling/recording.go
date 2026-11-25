@@ -1,6 +1,8 @@
 package signaling
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 
@@ -18,7 +20,58 @@ func SetRecorder(m *recording.Manager) {
 	recorder = m
 	m.OnStateChange(func(channelID int64, st recording.State) {
 		GlobalHub.BroadcastToChannel(channelID, recordingStateMessage(channelID, st))
+		if st.Active {
+			restartWSMedia(channelID)
+		}
 	})
+}
+
+// restartWSMedia asks the channel's WebSocket-audio clients to restart
+// their MediaRecorder. Only the first chunk of a MediaRecorder stream holds
+// the container header, so a recording that starts mid-stream needs a new
+// one. Participants who join later start a fresh recorder anyway.
+func restartWSMedia(channelID int64) {
+	msg, _ := json.Marshal(map[string]any{"type": "ws_media_restart"})
+	for _, u := range channel.GetUsers(channelID) {
+		GlobalHub.mu.RLock()
+		c := GlobalHub.clients[u.ID]
+		GlobalHub.mu.RUnlock()
+		if c != nil && c.wsMedia.Load() {
+			GlobalHub.SendToPriority(u.ID, msg)
+		}
+	}
+}
+
+// startMediaStream tells the recorder that the client's next audio chunk
+// begins a new MediaRecorder stream. The client sends this before the
+// stream's first chunk on the same connection, so the order holds.
+func startMediaStream(c *Client, mime string) {
+	chID := channel.GetUserChannel(c.UserID)
+	format := recording.FormatForMIME(mime)
+	if recorder == nil || chID == 0 || format == "" {
+		return
+	}
+	recorder.MediaStreamStarted(chID, c.mediaKey, format)
+}
+
+// recordMediaChunk hands a WebSocket audio chunk to the recorder.
+func recordMediaChunk(c *Client, channelID int64, chunk []byte) {
+	if recorder != nil {
+		recorder.MediaChunk(channelID, c.UserID, c.Username, c.mediaKey, chunk)
+	}
+}
+
+// endMediaStream closes the connection's WebSocket audio file, if any.
+func endMediaStream(c *Client, channelID int64) {
+	if recorder != nil {
+		recorder.MediaStreamEnded(channelID, c.mediaKey)
+	}
+}
+
+func newMediaKey() string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return "ws-" + hex.EncodeToString(b)
 }
 
 func recordingStateMessage(channelID int64, st recording.State) []byte {

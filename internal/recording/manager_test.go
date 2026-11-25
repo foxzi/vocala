@@ -251,7 +251,7 @@ func TestCleanupRemovesOldRecordings(t *testing.T) {
 	if list, _ := f.m.List(1, 10); len(list) != 0 {
 		t.Fatalf("recording still listed")
 	}
-	if _, err := f.blobs.Open(context.Background(), segmentKey(list[0].ID, seg.ID)); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := f.blobs.Open(context.Background(), segmentKey(list[0].ID, seg.ID, formatOgg)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("file still in storage: %v", err)
 	}
 }
@@ -381,7 +381,7 @@ func TestRecoverKeepsSegmentAlreadyInStorage(t *testing.T) {
 	})
 	time.Sleep(50 * time.Millisecond)
 	// Crash after the file was moved to storage, before stored = 1.
-	if err := f.blobs.PutFile(context.Background(), segmentKey(1, 1), f.m.tmpPath(1, 1)); err != nil {
+	if err := f.blobs.PutFile(context.Background(), segmentKey(1, 1, formatOgg), f.m.tmpPath(1, 1, formatOgg)); err != nil {
 		t.Fatal(err)
 	}
 	g := reopen(t, f.dir)
@@ -409,6 +409,64 @@ func TestOpusSamples(t *testing.T) {
 	for _, c := range cases {
 		if got := opusSamples(c.payload); got != c.want {
 			t.Errorf("opusSamples(%x) = %d, want %d", c.payload, got, c.want)
+		}
+	}
+}
+
+func TestWebSocketStreamsFromAnnouncedStart(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.m.Start(1, 1, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// A stream that started before the recording: no header, unusable.
+	f.m.MediaChunk(1, 5, "phone", "ws-1", []byte("old"))
+	// The client restarted its recorder; Chrome may split the header.
+	f.m.MediaStreamStarted(1, "ws-1", "webm")
+	f.m.MediaChunk(1, 5, "phone", "ws-1", []byte{0x1A})
+	f.m.MediaChunk(1, 5, "phone", "ws-1", []byte{0x45, 0xDF, 0xA3})
+	f.m.MediaChunk(1, 5, "phone", "ws-1", []byte("c1"))
+	// Restarted again (reconnect): a new file.
+	f.m.MediaStreamStarted(1, "ws-1", "webm")
+	f.m.MediaChunk(1, 5, "phone", "ws-1", []byte("h2"))
+	f.m.MediaStreamEnded(1, "ws-1")
+	f.m.MediaChunk(1, 5, "phone", "ws-1", []byte("after-end")) // not announced: dropped
+
+	list := stopAndList(t, f.m, 1)
+	segs := list[0].Segments
+	if len(segs) != 2 {
+		t.Fatalf("segments = %d, want 2", len(segs))
+	}
+	want := []string{"\x1a\x45\xdf\xa3c1", "h2"}
+	for i, seg := range segs {
+		if seg.Format != "webm" || seg.Name != "phone" || seg.UserID != 5 {
+			t.Errorf("segment %d = %+v", i, seg)
+		}
+		rc, format, err := f.m.OpenSegment(context.Background(), list[0].ID, seg.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(rc)
+		rc.Close()
+		if format != "webm" || string(data) != want[i] {
+			t.Errorf("segment %d: %s %q, want webm %q", i, format, data, want[i])
+		}
+		if seg.DurationMs < 60 {
+			t.Errorf("segment %d duration = %d ms, want at least one timeslice", i, seg.DurationMs)
+		}
+	}
+}
+
+func TestFormatForMIME(t *testing.T) {
+	cases := map[string]string{
+		"audio/webm;codecs=opus":     "webm",
+		"audio/webm":                 "webm",
+		"audio/mp4;codecs=mp4a.40.2": "mp4",
+		"audio/ogg":                  "",
+		"":                           "",
+	}
+	for mime, want := range cases {
+		if got := FormatForMIME(mime); got != want {
+			t.Errorf("FormatForMIME(%q) = %q, want %q", mime, got, want)
 		}
 	}
 }

@@ -420,6 +420,9 @@ function handleWSMessage(msg) {
         case 'recording_state':
             handleRecordingState(msg);
             break;
+        case 'ws_media_restart':
+            restartWSAudioSend();
+            break;
         case 'screen_preview_clear':
             screenShareUsername = null;
             removeRemoteVideo();
@@ -4503,19 +4506,44 @@ function startWSAudioSend(stream) {
         audioBitsPerSecond: 32000,
     });
 
+    // The server records this stream only from its first chunk (the one with
+    // the container header), so it is announced first and every chunk is
+    // sent in order behind it.
+    sendWSMediaInOrder(() => sendWS({ type: 'ws_media_stream', payload: { mime: mimeType } }));
     wsMediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
-            event.data.arrayBuffer().then(buf => {
-                // Frame: [0x01 (audio)] + [payload]
-                const frame = new Uint8Array(1 + buf.byteLength);
-                frame[0] = 0x01;
-                frame.set(new Uint8Array(buf), 1);
-                ws.send(frame.buffer);
-            });
-        }
+        if (event.data.size === 0) return;
+        sendWSMediaInOrder(() => event.data.arrayBuffer().then(buf => {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            // Frame: [0x01 (audio)] + [payload]
+            const frame = new Uint8Array(1 + buf.byteLength);
+            frame[0] = 0x01;
+            frame.set(new Uint8Array(buf), 1);
+            ws.send(frame.buffer);
+        }));
     };
 
     wsMediaRecorder.start(60); // 60ms chunks for low latency
+}
+
+// Blob.arrayBuffer() resolves asynchronously; chaining keeps the frames in
+// the order MediaRecorder produced them.
+let wsMediaSendChain = Promise.resolve();
+function sendWSMediaInOrder(task) {
+    wsMediaSendChain = wsMediaSendChain.then(task).catch(err => console.warn('WS media send:', err));
+}
+
+// The server asks for a fresh recorder when a call recording starts: only
+// the first chunk of a MediaRecorder stream carries the container header,
+// so the recording cannot use a stream that is already running.
+function restartWSAudioSend() {
+    const rec = wsMediaRecorder;
+    if (!rec || rec.state === 'inactive' || !processedStream) return;
+    // Start the new recorder only after the old one flushed its last chunk,
+    // so no chunk of the old stream lands after the new header.
+    rec.onstop = () => {
+        if (wsMediaRecorder === rec) startWSAudioSend(processedStream);
+    };
+    rec.stop();
 }
 
 function stopWSMedia() {

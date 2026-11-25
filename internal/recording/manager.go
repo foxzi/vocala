@@ -96,12 +96,16 @@ func (m *Manager) OnStateChange(fn func(channelID int64, st State)) {
 	m.notify = fn
 }
 
-// event is one packet, or the end of a track, on its way to the writer.
+// event is an RTP packet, a MediaRecorder chunk or the end of a track, on
+// its way to the writer.
 type event struct {
 	trackKey string
 	userID   int64
 	name     string
-	packet   []byte // nil for the end of the track
+	packet   []byte    // RTP packet from the SFU
+	chunk    []byte    // MediaRecorder chunk from a WebSocket client
+	at       time.Time // arrival of chunk
+	format   string    // set on the start of a MediaRecorder stream
 }
 
 // session is one active recording.
@@ -118,6 +122,8 @@ type session struct {
 	segments map[string]*segment // by SFU track key
 	broken   map[string]bool     // tracks whose file could not be opened
 	opened   int                 // segments created
+	streams  map[string]string   // WebSocket streams announced, waiting for their first chunk: key -> format
+	headless int                 // chunks of streams that started before the recording
 
 	pending sync.WaitGroup // segments being moved to storage
 	failed  atomic.Bool
@@ -155,6 +161,7 @@ func (m *Manager) Start(channelID, userID int64, username string) (State, error)
 		id: id, channelID: channelID, startedBy: username, startedAt: now,
 		queue:    make(chan event, queueSize),
 		segments: make(map[string]*segment), broken: make(map[string]bool),
+		streams: make(map[string]string),
 	}
 	if m.cfg.MaxDuration > 0 {
 		// Set before s is published: end reads s.limit from another goroutine.
@@ -278,6 +285,46 @@ func (m *Manager) AudioPacket(channelID, userID int64, username, trackKey string
 	}
 }
 
+// MediaStreamStarted announces that the client behind streamKey started a
+// new MediaRecorder stream of the given format: the next chunk is its
+// first, with the container header. Only such a stream can be stored —
+// chunks without the header cannot be decoded — so when recording starts,
+// signaling asks the clients to restart their recorder.
+func (m *Manager) MediaStreamStarted(channelID int64, streamKey, format string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if s := m.active[channelID]; s != nil {
+		select {
+		case s.queue <- event{trackKey: streamKey, format: format}:
+		default:
+			s.dropped.Add(1)
+		}
+	}
+}
+
+// MediaChunk receives one chunk of a MediaRecorder stream that a mobile
+// client sends over WebSocket instead of WebRTC. streamKey identifies the
+// client connection. Like AudioPacket it never blocks.
+func (m *Manager) MediaChunk(channelID, userID int64, username, streamKey string, chunk []byte) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s := m.active[channelID]
+	if s == nil {
+		return
+	}
+	ev := event{trackKey: streamKey, userID: userID, name: username, chunk: append([]byte(nil), chunk...), at: time.Now()}
+	select {
+	case s.queue <- ev:
+	default:
+		s.dropped.Add(1)
+	}
+}
+
+// MediaStreamEnded closes the file of a WebSocket media stream.
+func (m *Manager) MediaStreamEnded(channelID int64, streamKey string) {
+	m.AudioTrackEnded(channelID, streamKey)
+}
+
 // AudioTrackEnded closes the file of a track that stopped (peer left,
 // renegotiated, reconnected). If the queue is full the file is closed when
 // the recording stops instead.
@@ -296,12 +343,21 @@ func (m *Manager) AudioTrackEnded(channelID int64, trackKey string) {
 func (m *Manager) run(s *session) {
 	defer m.writers.Done()
 	for ev := range s.queue {
+		if ev.format != "" {
+			m.startStream(s, ev)
+			continue
+		}
+		if ev.chunk != nil {
+			m.writeChunk(s, ev)
+			continue
+		}
 		if ev.packet == nil {
 			if seg, ok := s.segments[ev.trackKey]; ok {
 				delete(s.segments, ev.trackKey)
 				m.finish(s, seg)
 			}
 			delete(s.broken, ev.trackKey)
+			delete(s.streams, ev.trackKey)
 			continue
 		}
 		m.write(s, ev)
@@ -330,7 +386,7 @@ func (m *Manager) write(s *session, ev event) {
 	}
 	if seg == nil {
 		var err error
-		if seg, err = m.openSegment(s, ev.userID, ev.name); err != nil {
+		if seg, err = m.openSegment(s, ev.userID, ev.name, formatOgg, time.Now()); err != nil {
 			logger.Error("recording: %d: open segment for user %d: %v", s.id, ev.userID, err)
 			s.broken[ev.trackKey] = true
 			s.failed.Store(true)
@@ -348,11 +404,60 @@ func (m *Manager) write(s *session, ev event) {
 	}
 }
 
+// startStream closes the file of the stream's previous MediaRecorder; the
+// next chunk opens a new one.
+func (m *Manager) startStream(s *session, ev event) {
+	if seg, ok := s.segments[ev.trackKey]; ok {
+		delete(s.segments, ev.trackKey)
+		m.finish(s, seg)
+	}
+	delete(s.broken, ev.trackKey)
+	s.streams[ev.trackKey] = ev.format
+}
+
+// writeChunk appends a MediaRecorder chunk. Chunks of a stream that began
+// before the recording are dropped: they lack the container header.
+func (m *Manager) writeChunk(s *session, ev event) {
+	seg := s.segments[ev.trackKey]
+	if seg == nil {
+		format, announced := s.streams[ev.trackKey]
+		if !announced {
+			s.headless++
+			return
+		}
+		delete(s.streams, ev.trackKey)
+		// The first chunk carries one timeslice of audio recorded before it
+		// was sent.
+		start := ev.at.Add(-mediaRecorderTimeslice)
+		var err error
+		if seg, err = m.openSegment(s, ev.userID, ev.name, format, start); err != nil {
+			logger.Error("recording: %d: open %s segment for user %d: %v", s.id, format, ev.userID, err)
+			s.broken[ev.trackKey] = true
+			s.failed.Store(true)
+			return
+		}
+		s.opened++
+		s.segments[ev.trackKey] = seg
+	}
+	if err := seg.appendChunk(ev.chunk, ev.at); err != nil {
+		logger.Error("recording: %d: write segment %d: %v", s.id, seg.id, err)
+		delete(s.segments, ev.trackKey)
+		s.broken[ev.trackKey] = true
+		s.failed.Store(true)
+		m.finish(s, seg)
+	}
+}
+
 // complete records the outcome once every segment is stored. A recording
 // without any audio is deleted: it would only clutter the list.
 func (m *Manager) complete(s *session) {
 	if n := s.dropped.Load(); n > 0 {
 		logger.Warn("recording: %d: dropped %d packets, the writer fell behind", s.id, n)
+	}
+	if s.headless > 0 {
+		// One is normal: the last chunk of the recorder the client stops on
+		// ws_media_restart. Many mean a client that does not restart.
+		logger.Info("recording: %d: skipped %d WebSocket chunks of streams that began before the recording", s.id, s.headless)
 	}
 	defer os.Remove(m.sessionTmpDir(s.id))
 	if s.opened == 0 && !s.failed.Load() {
@@ -377,44 +482,43 @@ func (m *Manager) sessionTmpDir(recordingID int64) string {
 	return filepath.Join(m.cfg.TmpDir, fmt.Sprint(recordingID))
 }
 
-func (m *Manager) tmpPath(recordingID, segmentID int64) string {
-	return filepath.Join(m.sessionTmpDir(recordingID), fmt.Sprintf("%d.ogg", segmentID))
+func (m *Manager) tmpPath(recordingID, segmentID int64, format string) string {
+	return filepath.Join(m.sessionTmpDir(recordingID), fmt.Sprintf("%d.%s", segmentID, format))
 }
 
-func segmentKey(recordingID, segmentID int64) string {
-	return fmt.Sprintf("recordings/%d/%d.ogg", recordingID, segmentID)
+func segmentKey(recordingID, segmentID int64, format string) string {
+	return fmt.Sprintf("recordings/%d/%d.%s", recordingID, segmentID, format)
 }
 
 // openSegment registers the segment in the database first, so a crash
 // mid-call leaves a row that RecoverInterrupted can match to its file.
-func (m *Manager) openSegment(s *session, userID int64, name string) (*segment, error) {
-	now := time.Now()
+func (m *Manager) openSegment(s *session, userID int64, name, format string, startedAt time.Time) (*segment, error) {
 	tx, err := m.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(
-		`INSERT INTO recording_segments (recording_id, user_id, display_name, started_at_ms, storage_key, format) VALUES (?, ?, ?, ?, '', 'ogg')`,
-		s.id, userID, name, now.UnixMilli(),
+		`INSERT INTO recording_segments (recording_id, user_id, display_name, started_at_ms, storage_key, format) VALUES (?, ?, ?, ?, '', ?)`,
+		s.id, userID, name, startedAt.UnixMilli(), format,
 	)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	key := segmentKey(s.id, id)
+	key := segmentKey(s.id, id, format)
 	if _, err := tx.Exec(`UPDATE recording_segments SET storage_key = ? WHERE id = ?`, key, id); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(m.sessionTmpDir(s.id), 0o750); err != nil {
 		return nil, err
 	}
-	seg, err := openSegment(id, userID, name, key, m.tmpPath(s.id, id), now)
+	seg, err := openSegment(id, userID, name, key, m.tmpPath(s.id, id, format), format, startedAt)
 	if err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
-		seg.w.Close()
+		seg.close()
 		os.Remove(seg.tmpPath)
 		return nil, err
 	}
@@ -435,7 +539,7 @@ func (m *Manager) finish(s *session, seg *segment) {
 }
 
 func (m *Manager) store(seg *segment) error {
-	if err := seg.w.Close(); err != nil {
+	if err := seg.close(); err != nil {
 		return err
 	}
 	if err := m.blobs.PutFile(context.Background(), seg.key, seg.tmpPath); err != nil {

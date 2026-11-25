@@ -167,7 +167,7 @@ func handleRecordingAudio(w http.ResponseWriter, r *http.Request) {
 	defer rc.Close()
 
 	name := "recording-" + strconv.FormatInt(recID, 10) + "-" + strconv.FormatInt(segID, 10) + "." + format
-	w.Header().Set("Content-Type", "audio/ogg")
+	w.Header().Set("Content-Type", "audio/"+format) // ogg, webm or mp4
 	w.Header().Set("Content-Disposition", `inline; filename="`+name+`"`)
 	w.Header().Set("Cache-Control", "private, max-age=3600")
 	if rs, ok := rc.(io.ReadSeeker); ok {
