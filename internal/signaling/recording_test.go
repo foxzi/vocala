@@ -25,7 +25,7 @@ func withRecorder(t *testing.T) *recording.Manager {
 		t.Fatal(err)
 	}
 	old, oldGrace := recorder, emptyGrace
-	recorder, emptyGrace = m, 100*time.Millisecond
+	recorder, emptyGrace = m, 400*time.Millisecond
 	t.Cleanup(func() {
 		emptyTimersMu.Lock()
 		for id, w := range emptyTimers {
@@ -50,10 +50,10 @@ func TestRecordingSurvivesShortEmptyChannel(t *testing.T) {
 	}
 	channel.Leave(1)
 	channelUsersChanged(ch)
-	time.Sleep(30 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	channel.Join(ch, 1, "alice") // back within the grace
 	channelUsersChanged(ch)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 	if !m.State(ch).Active {
 		t.Fatal("recording stopped although alice came back in time")
 	}
@@ -61,11 +61,11 @@ func TestRecordingSurvivesShortEmptyChannel(t *testing.T) {
 	// Leaving again restarts the wait; staying away stops it.
 	channel.Leave(1)
 	channelUsersChanged(ch)
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	if !m.State(ch).Active {
 		t.Fatal("recording stopped before the grace ran out")
 	}
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(700 * time.Millisecond)
 	if m.State(ch).Active {
 		t.Fatal("recording still running in a channel empty for longer than the grace")
 	}

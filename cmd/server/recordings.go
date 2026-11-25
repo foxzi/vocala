@@ -227,6 +227,11 @@ func handleRecordingAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rc, format, err := recorder.OpenSegment(r.Context(), recID, segID)
+	if err != nil {
+		// An error must not be cached for a day and confirmed by 304s.
+		w.Header().Del("ETag")
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	if errors.Is(err, recording.ErrNotFound) || errors.Is(err, storage.ErrNotFound) {
 		http.NotFound(w, r)
 		return

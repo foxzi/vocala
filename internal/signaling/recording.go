@@ -27,6 +27,22 @@ func SetRecorder(m *recording.Manager) {
 			restartWSMedia(channelID)
 		}
 	})
+	m.OnStreamBroken(restartUserWSMedia)
+}
+
+// restartUserWSMedia asks one WebSocket-audio client for a new stream, if
+// it is still in the channel: a disk error broke its recorded stream.
+func restartUserWSMedia(channelID, userID int64) {
+	if channel.GetUserChannel(userID) != channelID {
+		return
+	}
+	GlobalHub.mu.RLock()
+	c := GlobalHub.clients[userID]
+	GlobalHub.mu.RUnlock()
+	if c != nil && c.wsMedia.Load() {
+		msg, _ := json.Marshal(map[string]any{"type": "ws_media_restart"})
+		GlobalHub.SendToPriority(userID, msg)
+	}
 }
 
 // restartWSMedia asks the channel's WebSocket-audio clients to restart
@@ -161,7 +177,9 @@ type emptyWait struct{ timer *time.Timer }
 // recording once the channel has stayed empty for emptyGrace.
 func channelUsersChanged(channelID int64) {
 	broadcastChannelUpdate(channelID)
-	if recorder == nil || len(channel.GetUsers(channelID)) > 0 {
+	// A recording cannot start in an empty channel, so only a running one
+	// needs the wait.
+	if recorder == nil || len(channel.GetUsers(channelID)) > 0 || !recorder.State(channelID).Active {
 		return
 	}
 	// Each time the channel empties the wait starts over; whoever comes

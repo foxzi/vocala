@@ -82,6 +82,10 @@ type Manager struct {
 	notify func(channelID int64, st State)
 	// onRecorded is told about every recording whose audio is in storage.
 	onRecorded func(channelID, recordingID int64)
+	// onStreamBroken is told, diskRetry after a disk error, that a
+	// WebSocket audio stream needs a new stream (with a header) to be
+	// recorded again.
+	onStreamBroken func(channelID, userID int64)
 
 	mu        sync.RWMutex
 	active    map[int64]*session
@@ -114,6 +118,21 @@ func (m *Manager) OnStateChange(fn func(channelID int64, st State)) {
 	m.notify = fn
 }
 
+// OnStreamBroken registers who restarts a WebSocket client's MediaRecorder
+// after a disk error broke its stream. Set it before recording starts.
+func (m *Manager) OnStreamBroken(fn func(channelID, userID int64)) {
+	m.onStreamBroken = fn
+}
+
+// restartStreamLater asks, after diskRetry, for a new stream of the user's
+// WebSocket audio: raw WebM cannot resume mid-stream.
+func (m *Manager) restartStreamLater(s *session, userID int64) {
+	if m.onStreamBroken == nil {
+		return
+	}
+	time.AfterFunc(diskRetry, func() { m.onStreamBroken(s.channelID, userID) })
+}
+
 // event is an RTP packet, a MediaRecorder chunk or the end of a track, on
 // its way to the writer.
 type event struct {
@@ -139,7 +158,7 @@ type session struct {
 	// Owned by the writer goroutine.
 	segments map[string]*segment  // by SFU track key
 	broken   map[string]time.Time // tracks whose file failed: not retried before this time (zero: until the next WebSocket stream)
-	diskErrs int                  // files that could not be opened or written
+	diskErrs int                  // failed file opens and writes, retries included
 	opened   int                  // segments created
 	streams  map[string]string    // WebSocket streams announced, waiting for their first chunk: key -> format
 	headless int                  // chunks of streams that started before the recording
@@ -495,6 +514,9 @@ func (m *Manager) startStream(s *session, ev event) {
 // before the recording are dropped: they lack the container header.
 func (m *Manager) writeChunk(s *session, ev event) {
 	if s.brokenNow(ev.trackKey) {
+		// The chunk belongs to the dead stream; so does any loss noted
+		// meanwhile, which must not drop the next stream.
+		s.takeLost(ev.trackKey)
 		return
 	}
 	if s.takeLost(ev.trackKey) {
@@ -522,17 +544,19 @@ func (m *Manager) writeChunk(s *session, ev event) {
 		start := ev.at.Add(-mediaRecorderTimeslice)
 		var err error
 		if seg, err = m.openSegment(s, ev.userID, ev.name, format, start); err != nil {
-			logger.Error("recording: %d: open %s segment for user %d, waiting for the next stream: %v", s.id, format, ev.userID, err)
+			logger.Error("recording: %d: open %s segment for user %d, asking for a new stream in %s: %v", s.id, format, ev.userID, diskRetry, err)
 			s.markBroken(ev.trackKey, time.Time{})
+			m.restartStreamLater(s, ev.userID)
 			return
 		}
 		s.opened++
 		s.segments[ev.trackKey] = seg
 	}
 	if err := seg.appendChunk(ev.chunk, ev.at); err != nil {
-		logger.Error("recording: %d: write segment %d, waiting for the next stream: %v", s.id, seg.id, err)
+		logger.Error("recording: %d: write segment %d, asking for a new stream in %s: %v", s.id, seg.id, diskRetry, err)
 		delete(s.segments, ev.trackKey)
 		s.markBroken(ev.trackKey, time.Time{})
+		m.restartStreamLater(s, ev.userID)
 		m.finish(s, seg)
 	}
 }
@@ -551,7 +575,7 @@ func (m *Manager) complete(s *session) {
 	}
 	defer os.Remove(m.sessionTmpDir(s.id))
 	if s.diskErrs > 0 {
-		logger.Warn("recording: %d: %d disk errors, some audio was lost", s.id, s.diskErrs)
+		logger.Warn("recording: %d: %d failed disk writes (retries included), some audio was lost", s.id, s.diskErrs)
 	}
 	if s.opened == 0 && s.diskErrs > 0 {
 		// Nothing could be written at all: keep it visible as failed.

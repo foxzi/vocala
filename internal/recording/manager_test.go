@@ -753,3 +753,35 @@ func TestRecordingsOfParticipants(t *testing.T) {
 		t.Errorf("after channel deletion: %+v, %v", rec, err)
 	}
 }
+
+// A WebSocket stream cannot resume mid-stream after a disk error: the
+// client is asked for a new stream once diskRetry has passed.
+func TestDiskErrorAsksWebSocketClientForNewStream(t *testing.T) {
+	old := diskRetry
+	diskRetry = 50 * time.Millisecond
+	t.Cleanup(func() { diskRetry = old })
+	f := newFixture(t)
+	asked := make(chan [2]int64, 1)
+	f.m.OnStreamBroken(func(ch, user int64) { asked <- [2]int64{ch, user} })
+
+	st, err := f.m.Start(1, 5, "phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker := f.m.sessionTmpDir(st.RecordingID)
+	os.MkdirAll(filepath.Dir(blocker), 0o750)
+	os.WriteFile(blocker, nil, 0o600)
+	f.m.MediaStreamStarted(1, "ws-5", "webm")
+	f.m.MediaChunk(1, 5, "phone", "ws-5", []byte{0x1A})
+	select {
+	case got := <-asked:
+		if got != [2]int64{1, 5} {
+			t.Fatalf("asked %v, want channel 1 user 5", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the client was never asked for a new stream")
+	}
+	os.Remove(blocker)
+	f.m.Stop(1)
+	f.m.Wait()
+}
