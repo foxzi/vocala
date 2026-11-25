@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/foxzi/vocala/internal/logger"
+	"github.com/foxzi/vocala/internal/storage"
 )
 
 // Recording is a finished or running recording with its stored segments.
@@ -166,7 +167,10 @@ func (m *Manager) delete(recordingID int64) error {
 	// is not in the column yet.
 	keys = append(keys, transcriptKey(recordingID))
 	for _, k := range keys {
-		if err := m.blobs.Delete(context.Background(), k); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), storageTimeout)
+		err := m.blobs.Delete(ctx, k)
+		cancel()
+		if err != nil {
 			return err
 		}
 	}
@@ -181,66 +185,120 @@ func (m *Manager) delete(recordingID int64) error {
 // RecoverInterrupted finishes recordings that were running when the server
 // stopped without StopAll (crash, kill). Their segment files are complete up
 // to the last written page; the file's modification time stands in for the
-// end, since the RTP timestamps died with the process.
+// end, since the RTP timestamps died with the process. Call it before the
+// server accepts connections, or split it: InterruptedRecordings first,
+// then RecoverRecordings in the background.
 func (m *Manager) RecoverInterrupted() error {
-	rows, err := m.db.Query(`SELECT id, channel_id, started_at_ms FROM recordings WHERE status = ?`, StatusRecording)
+	ids, err := m.InterruptedRecordings()
 	if err != nil {
 		return err
 	}
-	type rec struct{ id, channelID, startedAt int64 }
-	var recs []rec
+	return m.RecoverRecordings(ids)
+}
+
+// InterruptedRecordings lists the recordings a stopped server left running.
+// It must run before new recordings can start: those are "recording" too.
+func (m *Manager) InterruptedRecordings() ([]int64, error) {
+	return m.recordingIDs(`SELECT id FROM recordings WHERE status = ?`, StatusRecording)
+}
+
+// RecoverRecordings stores what interrupted recordings left on disk.
+func (m *Manager) RecoverRecordings(ids []int64) error {
+	for _, id := range ids {
+		if err := m.settle(id, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RetryFailedUploads uploads segments that a storage outage left on the
+// local disk, for recordings that ended as failed. Safe to run any time:
+// running recordings are never "failed".
+func (m *Manager) RetryFailedUploads() error {
+	ids, err := m.recordingIDs(
+		`SELECT DISTINCT r.id FROM recordings r JOIN recording_segments s ON s.recording_id = r.id
+		 WHERE r.status = ? AND s.stored = 0`, StatusFailed)
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := m.settle(id, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) recordingIDs(query string, args ...any) ([]int64, error) {
+	rows, err := m.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
 	for rows.Next() {
-		var r rec
-		if err := rows.Scan(&r.id, &r.channelID, &r.startedAt); err == nil {
-			recs = append(recs, r)
+		var id int64
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
 		}
 	}
-	rows.Close()
+	return ids, rows.Err()
+}
 
-	for _, r := range recs {
-		ended := r.startedAt
-		segRows, err := m.db.Query(`SELECT id, started_at_ms, storage_key, format FROM recording_segments WHERE recording_id = ? AND stored = 0`, r.id)
-		if err != nil {
-			return err
-		}
-		type seg struct {
-			id, startedAt int64
-			key, format   string
-		}
-		var segs []seg
-		for segRows.Next() {
-			var s seg
-			if err := segRows.Scan(&s.id, &s.startedAt, &s.key, &s.format); err == nil {
-				segs = append(segs, s)
-			}
-		}
-		segRows.Close()
-
-		failed := false
-		for _, s := range segs {
-			switch rec, err := m.recoverSegment(r.id, s.id, s.startedAt, s.key, s.format); {
-			case err != nil:
-				logger.Error("recording: recover segment %d: %v", s.id, err)
-				failed = true
-			case rec.end > 0:
-				ended = max(ended, rec.end)
-			}
-		}
-		// Ended stays at max(started, last segment) — never "now", which
-		// could be hours after the crash.
-		status := StatusReady
-		if failed {
-			status = StatusFailed
-		}
-		if _, err := m.db.Exec(`UPDATE recordings SET ended_at_ms = ?, status = ? WHERE id = ?`, ended, status, r.id); err != nil {
-			return err
-		}
-		if !failed {
-			_ = os.Remove(m.sessionTmpDir(r.id))
-		}
-		logger.Info("recording: recovered interrupted recording %d (%s)", r.id, status)
-		m.recorded(r.channelID, r.id)
+// settle moves a recording's unstored segments to storage and records the
+// outcome. For an interrupted recording the end time is taken from the
+// files (interrupted = true); a failed one keeps its end time.
+func (m *Manager) settle(id int64, interrupted bool) error {
+	var channelID, startedAt, endedAt int64
+	if err := m.db.QueryRow(`SELECT channel_id, started_at_ms, ended_at_ms FROM recordings WHERE id = ?`, id).
+		Scan(&channelID, &startedAt, &endedAt); err != nil {
+		return err
 	}
+	segRows, err := m.db.Query(`SELECT id, started_at_ms, storage_key, format FROM recording_segments WHERE recording_id = ? AND stored = 0`, id)
+	if err != nil {
+		return err
+	}
+	type seg struct {
+		id, startedAt int64
+		key, format   string
+	}
+	var segs []seg
+	for segRows.Next() {
+		var s seg
+		if err := segRows.Scan(&s.id, &s.startedAt, &s.key, &s.format); err == nil {
+			segs = append(segs, s)
+		}
+	}
+	segRows.Close()
+
+	ended := max(startedAt, endedAt)
+	failed := false
+	for _, s := range segs {
+		switch rec, err := m.recoverSegment(id, s.id, s.startedAt, s.key, s.format); {
+		case err != nil:
+			logger.Error("recording: recover segment %d: %v", s.id, err)
+			failed = true
+		case interrupted && rec.end > 0:
+			ended = max(ended, rec.end)
+		}
+	}
+	status := StatusReady
+	if failed {
+		status = StatusFailed
+	}
+	// Ended stays at max(started, last segment) — never "now", which
+	// could be hours after the crash.
+	if _, err := m.db.Exec(`UPDATE recordings SET ended_at_ms = ?, status = ? WHERE id = ?`, ended, status, id); err != nil {
+		return err
+	}
+	if failed {
+		logger.Warn("recording: %d still has segments that could not be stored; will retry", id)
+		return nil
+	}
+	_ = os.Remove(m.sessionTmpDir(id))
+	logger.Info("recording: %d recovered (%s)", id, status)
+	m.recorded(channelID, id)
 	return nil
 }
 
@@ -257,17 +315,26 @@ func (m *Manager) recoverSegment(recordingID, segmentID, startedAt int64, key, f
 	tmp := m.tmpPath(recordingID, segmentID, format)
 	fi, err := os.Stat(tmp)
 	if err != nil {
-		rc, openErr := m.blobs.Open(context.Background(), key)
-		if openErr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), storageTimeout)
+		defer cancel()
+		rc, openErr := m.blobs.Open(ctx, key)
+		switch {
+		case errors.Is(openErr, storage.ErrNotFound):
+			// Neither on disk nor in storage: the segment is gone.
 			_, err := m.db.Exec(`DELETE FROM recording_segments WHERE id = ?`, segmentID)
 			return recovered{}, err
+		case openErr != nil:
+			// The storage could not answer: keep the row and try later.
+			return recovered{}, openErr
 		}
 		rc.Close()
 		_, err := m.db.Exec(`UPDATE recording_segments SET stored = 1 WHERE id = ?`, segmentID)
 		return recovered{}, err
 	}
 	end := fi.ModTime().UnixMilli()
-	if err := m.blobs.PutFile(context.Background(), key, tmp); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), storageTimeout)
+	defer cancel()
+	if err := m.blobs.PutFile(ctx, key, tmp); err != nil {
 		return recovered{}, err
 	}
 	_, err = m.db.Exec(`UPDATE recording_segments SET duration_ms = ?, stored = 1 WHERE id = ?`, max(0, end-startedAt), segmentID)

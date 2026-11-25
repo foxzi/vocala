@@ -506,3 +506,143 @@ func TestLostWebSocketChunkClosesStream(t *testing.T) {
 		t.Fatalf("segments = %q, want [h1a h2]", got)
 	}
 }
+
+// flakyBlobs fails PutFile (and Open, if openErr is set) while down.
+type flakyBlobs struct {
+	*storage.Local
+	mu      sync.Mutex
+	down    bool
+	failsN  int // PutFile calls left to fail even when up
+	puts    int
+	openErr error
+}
+
+func (f *flakyBlobs) PutFile(ctx context.Context, key, path string) error {
+	f.mu.Lock()
+	f.puts++
+	fail := f.down || f.failsN > 0
+	if f.failsN > 0 {
+		f.failsN--
+	}
+	f.mu.Unlock()
+	if fail {
+		return errors.New("connection refused")
+	}
+	return f.Local.PutFile(ctx, key, path)
+}
+
+func (f *flakyBlobs) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	err := f.openErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return f.Local.Open(ctx, key)
+}
+
+func flakyFixture(t *testing.T, blobs *flakyBlobs) *Manager {
+	t.Helper()
+	dir := t.TempDir()
+	database.Init(filepath.Join(dir, "test.db"))
+	t.Cleanup(func() { database.DB.Close() })
+	local, err := storage.NewLocal(filepath.Join(dir, "storage"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs.Local = local
+	m, err := NewManager(database.DB, blobs, Config{
+		TmpDir: filepath.Join(dir, "storage", "tmp"), UploadAttempts: 3, UploadBackoff: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestUploadRetriesShortOutage(t *testing.T) {
+	blobs := &flakyBlobs{failsN: 2}
+	m := flakyFixture(t, blobs)
+	if _, err := m.Start(1, 1, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	talk(t, m, 1, 1, "alice", "a", 0, 10)
+	list := stopAndList(t, m, 1)
+	if list[0].Status != StatusReady || len(list[0].Segments) != 1 || blobs.puts != 3 {
+		t.Fatalf("status %s, segments %d, uploads %d; want ready after the third upload", list[0].Status, len(list[0].Segments), blobs.puts)
+	}
+}
+
+func TestFailedUploadIsRetriedLater(t *testing.T) {
+	blobs := &flakyBlobs{down: true}
+	m := flakyFixture(t, blobs)
+	var recorded []int64
+	m.OnRecorded(func(_, id int64) { recorded = append(recorded, id) })
+	st, err := m.Start(1, 1, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	talk(t, m, 1, 1, "alice", "a", 0, 10)
+	list := stopAndList(t, m, 1)
+	if list[0].Status != StatusFailed || len(list[0].Segments) != 0 || len(recorded) != 0 {
+		t.Fatalf("during the outage: status %s, stored segments %d, recorded %v", list[0].Status, len(list[0].Segments), recorded)
+	}
+
+	// Still down: nothing changes, the file stays on disk.
+	if err := m.RetryFailedUploads(); err != nil {
+		t.Fatal(err)
+	}
+	if entries, _ := os.ReadDir(m.sessionTmpDir(st.RecordingID)); len(entries) != 1 {
+		t.Fatalf("tmp files = %d, want the segment kept", len(entries))
+	}
+
+	blobs.mu.Lock()
+	blobs.down = false
+	blobs.mu.Unlock()
+	if err := m.RetryFailedUploads(); err != nil {
+		t.Fatal(err)
+	}
+	list, _ = m.List(1, 10)
+	if list[0].Status != StatusReady || len(list[0].Segments) != 1 {
+		t.Fatalf("after the outage: status %s, segments %d; want ready with 1", list[0].Status, len(list[0].Segments))
+	}
+	if len(recorded) != 1 || recorded[0] != st.RecordingID {
+		t.Fatalf("recorded = %v, want the recording queued for transcription once", recorded)
+	}
+}
+
+// A storage that cannot answer must not make recovery forget a segment
+// that may well be in it.
+func TestRecoveryKeepsSegmentWhenStorageErrs(t *testing.T) {
+	blobs := &flakyBlobs{}
+	m := flakyFixture(t, blobs)
+	if _, err := m.Start(1, 1, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	talk(t, m, 1, 1, "alice", "a", 0, 10)
+	waitFor(t, func() bool {
+		entries, _ := os.ReadDir(m.sessionTmpDir(1))
+		return len(entries) == 1
+	})
+	time.Sleep(50 * time.Millisecond)
+	// Crash after the upload, before stored = 1; then the storage errs.
+	if err := blobs.Local.PutFile(context.Background(), segmentKey(1, 1, formatOgg), m.tmpPath(1, 1, formatOgg)); err != nil {
+		t.Fatal(err)
+	}
+	blobs.openErr = errors.New("503 slow down")
+	if err := m.RecoverInterrupted(); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	database.DB.QueryRow(`SELECT COUNT(*) FROM recording_segments WHERE recording_id = 1`).Scan(&rows)
+	if rows != 1 {
+		t.Fatalf("segment rows = %d, want the row kept", rows)
+	}
+	blobs.openErr = nil
+	if err := m.RetryFailedUploads(); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := m.List(1, 10); list[0].Status != StatusReady || len(list[0].Segments) != 1 {
+		t.Fatalf("after storage recovered: %+v", list[0])
+	}
+}

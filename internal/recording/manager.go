@@ -48,7 +48,17 @@ type Config struct {
 	TmpDir string
 	// MaxDuration stops a forgotten recording; 0 means no limit.
 	MaxDuration time.Duration
+	// UploadAttempts and UploadBackoff (doubled after each failure) ride
+	// out a short storage outage when a segment is moved to storage.
+	// Zero values mean 5 attempts starting at 10 s (about 2.5 minutes).
+	UploadAttempts int
+	UploadBackoff  time.Duration
 }
+
+// storageTimeout bounds one storage call (upload of one segment, a delete,
+// a lookup), so a storage that accepts connections but never answers
+// cannot hold a recording or the shutdown forever.
+const storageTimeout = 5 * time.Minute
 
 // State is what clients see about a channel's recording. A stopped
 // recording keeps its RecordingID so clients can tell a late "stopped"
@@ -82,6 +92,12 @@ type Manager struct {
 }
 
 func NewManager(db *sql.DB, blobs storage.Blobs, cfg Config) (*Manager, error) {
+	if cfg.UploadAttempts <= 0 {
+		cfg.UploadAttempts = 5
+	}
+	if cfg.UploadBackoff <= 0 {
+		cfg.UploadBackoff = 10 * time.Second
+	}
 	if err := os.MkdirAll(cfg.TmpDir, 0o750); err != nil {
 		return nil, fmt.Errorf("recording: create %s: %w", cfg.TmpDir, err)
 	}
@@ -528,7 +544,11 @@ func (m *Manager) complete(s *session) {
 		logger.Error("recording: finish %d: %v", s.id, err)
 	}
 	logger.Info("recording: %d stopped (%s)", s.id, status)
-	m.recorded(s.channelID, s.id)
+	if status == StatusReady {
+		// A failed one waits for RetryFailedUploads; a member can still
+		// queue its transcript by hand.
+		m.recorded(s.channelID, s.id)
+	}
 }
 
 func (m *Manager) sessionTmpDir(recordingID int64) string {
@@ -578,6 +598,24 @@ func (m *Manager) openSegment(s *session, userID int64, name, format string, sta
 	return seg, nil
 }
 
+// upload moves a finished file to storage, retrying with backoff. A file
+// that still fails stays on the local disk for RetryFailedUploads.
+func (m *Manager) upload(key, localPath string) error {
+	backoff := m.cfg.UploadBackoff
+	var err error
+	for attempt := 1; ; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), storageTimeout)
+		err = m.blobs.PutFile(ctx, key, localPath)
+		cancel()
+		if err == nil || attempt >= m.cfg.UploadAttempts {
+			return err
+		}
+		logger.Warn("recording: upload %s, attempt %d: %v", key, attempt, err)
+		time.Sleep(backoff)
+		backoff *= 2
+	}
+}
+
 // finish closes seg and moves it to storage in the background, so a slow
 // store (S3) does not hold up the writer.
 func (m *Manager) finish(s *session, seg *segment) {
@@ -595,7 +633,7 @@ func (m *Manager) store(seg *segment) error {
 	if err := seg.close(); err != nil {
 		return err
 	}
-	if err := m.blobs.PutFile(context.Background(), seg.key, seg.tmpPath); err != nil {
+	if err := m.upload(seg.key, seg.tmpPath); err != nil {
 		return err
 	}
 	_, err := m.db.Exec(`UPDATE recording_segments SET duration_ms = ?, stored = 1 WHERE id = ?`,
