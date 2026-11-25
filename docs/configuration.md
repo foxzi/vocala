@@ -57,7 +57,7 @@ storage:
     insecure: false         # plain HTTP
 
 recording:
-  enabled: true             # server-side call recording
+  enabled: false            # server-side call recording, off by default
   tmp_dir: ""               # files being written; default <storage dir>/tmp
   max_hours: 4              # stop a forgotten recording (0 = no limit)
   retention_days: 30        # delete older recordings (0 = keep forever)
@@ -86,14 +86,14 @@ Env vars override YAML settings:
 | `VOCALA_S3_ENDPOINT`, `VOCALA_S3_BUCKET`, `VOCALA_S3_PREFIX`, `VOCALA_S3_REGION` | | S3 location |
 | `VOCALA_S3_ACCESS_KEY`, `VOCALA_S3_SECRET_KEY` | | S3 keys |
 | `VOCALA_S3_INSECURE` | `false` | `true` for plain HTTP |
-| `VOCALA_RECORDING` | `true` | Set `false` or `0` to disable call recording |
+| `VOCALA_RECORDING` | `false` | Set `true` or `1` to enable call recording |
 | `VOCALA_STT_URL` | *(disabled)* | Speech service for transcripts, e.g. `http://whisper:8000` |
 | `VOCALA_STT_MODEL` | `Systran/faster-whisper-medium` | Whisper model |
 | `VOCALA_STT_LANGUAGE` | `ru` | Speech language; empty = detect |
 
 ### Call Recording
 
-Any participant can start recording a call with the record button; everyone in the call sees a "REC" indicator, and people who join later are told the call is being recorded. The server writes each participant's audio to its own Ogg/Opus file without re-encoding. Recording stops when someone presses the button again, when the last participant leaves, or after `max_hours`. Channel members find recordings under **Recordings** in the channel header. Design: [ADR-0001](adr/0001-recording-and-transcription.md).
+Recording is off by default: turn it on with `recording.enabled: true` or `VOCALA_RECORDING=true`. Then any participant can start recording a call with the record button; everyone in the call sees a "REC" indicator, and people who join later are told the call is being recorded. The server writes each participant's audio to its own Ogg/Opus file without re-encoding. Recording stops when someone presses the button again, when the channel has stayed empty for a minute (whoever comes back sooner, e.g. after a page reload, continues the same recording), or after `max_hours`. Channel members find recordings under **Recordings** in the channel header. Everyone who started a recording or has a track in it also finds it under **My recordings** (the button next to Settings), in any channel; this keeps recordings of group calls reachable after their channel is removed. Admins can see every recording, direct calls included, and switch My recordings to **All**. If the server cannot write a participant's file (e.g. a full disk), it tries again 10 seconds later (a WebSocket-audio client is asked to restart its recorder then); the audio in between is lost. Design: [ADR-0001](adr/0001-recording-and-transcription.md).
 
 Regular Android calls use WebRTC like everyone else. An Android client that joined without a microphone and turned it on later sends audio over WebSocket as MediaRecorder chunks instead; that audio is stored as WebM as it arrives (the browser player shows no total length for these files). When a recording starts, the server asks these clients to restart their recorder, because only the start of a stream carries the container header; the client announces each new stream (`ws_media_stream`) before its first chunk.
 
@@ -173,7 +173,7 @@ SQLite database is created automatically on first run. WAL mode is enabled for c
 
 ### Storage
 
-Recordings and transcripts go to `storage.backend`: a local directory (default) or any S3-compatible storage — AWS S3, Yandex Object Storage, Selectel, MinIO, SeaweedFS, Garage. The bucket must exist; Vocala checks it at startup, and if it is unreachable, recording turns off with an error in the log while calls keep working. Files being recorded are written to the local disk first (`recording.tmp_dir`) and uploaded when a participant's track ends. If the storage is down at that moment, the upload is retried for a few minutes; after that the recording is marked failed, the file stays on disk and is uploaded again every 10 minutes until it succeeds. Playback reads the object with range requests, so seeking works. The default prefix is `vocala/`; an endpoint given as a URL (`https://…`) is accepted.
+Recordings and transcripts go to `storage.backend`: a local directory (default) or any S3-compatible storage — AWS S3, Yandex Object Storage, Selectel, MinIO, SeaweedFS, Garage. The bucket must exist; Vocala checks it at startup. A missing bucket or wrong keys turn recording off with an error in the log, while calls keep working; a storage that does not answer yet (still starting) only gives a warning, and uploads are retried. Files being recorded are written to the local disk first (`recording.tmp_dir`) and uploaded when a participant's track ends. If the storage is down at that moment, the upload is retried for a few minutes; after that the recording is marked failed, the file stays on disk and is uploaded again every 10 minutes until it succeeds. Playback reads the object with range requests, so seeking works. The default prefix is `vocala/`; an endpoint given as a URL (`https://…`) is accepted.
 
 Switching the backend does not move existing recordings: they stay in the old place and are not shown as playable until retention removes their rows. Copy them to the new storage under the same keys (`recordings/<id>/...`) if you need them.
 
@@ -197,8 +197,8 @@ Vocala настраивается через файл `config.yaml` и/или п
 - `turn` -- встроенный TURN/TURNS сервер, TLS-настройки
 - `auth` -- длина сессий, минимальная длина пароля, secure cookie, rate limit
 - `security` -- разрешённые origins для WebSocket
-- `storage` -- где хранятся записи: `local.dir` (по умолчанию `storage` рядом с файлом БД); S3 — позже
-- `recording` -- запись звонков: `enabled`, `max_hours` (предел длины записи), `retention_days` (срок хранения, 0 = вечно)
+- `storage` -- где хранятся записи: `backend` (`local` или `s3`), `local.dir` (по умолчанию `storage` рядом с файлом БД), `s3.*`
+- `recording` -- запись звонков: `enabled` (по умолчанию выключена), `max_hours` (предел длины записи), `retention_days` (срок хранения, 0 = вечно)
 
 ### Переменные окружения
 
@@ -216,14 +216,14 @@ Vocala настраивается через файл `config.yaml` и/или п
 | `VOCALA_S3_ENDPOINT`, `VOCALA_S3_BUCKET`, `VOCALA_S3_PREFIX`, `VOCALA_S3_REGION` | | Где лежат записи в S3 |
 | `VOCALA_S3_ACCESS_KEY`, `VOCALA_S3_SECRET_KEY` | | Ключи S3 |
 | `VOCALA_S3_INSECURE` | `false` | `true` — обычный HTTP |
-| `VOCALA_RECORDING` | `true` | `false` или `0`, чтобы выключить запись звонков |
+| `VOCALA_RECORDING` | `false` | `true` или `1`, чтобы включить запись звонков |
 | `VOCALA_STT_URL` | *(выключено)* | Сервис распознавания для расшифровок, например `http://whisper:8000` |
 | `VOCALA_STT_MODEL` | `Systran/faster-whisper-medium` | Модель Whisper |
 | `VOCALA_STT_LANGUAGE` | `ru` | Язык речи; пусто — определять |
 
 ### Запись звонков
 
-Запись включает любой участник кнопкой записи; у всех в звонке горит индикатор «REC», а вошедшим позже сообщается, что идёт запись. Сервер пишет звук каждого участника в свой файл Ogg/Opus без перекодирования. Запись останавливается кнопкой, когда звонок покинул последний участник, или через `max_hours`. Записи канала — кнопка **Recordings** в шапке канала. Решение — [ADR-0001](adr/0001-recording-and-transcription.md).
+По умолчанию запись выключена: включите её через `recording.enabled: true` или `VOCALA_RECORDING=true`. Тогда запись включает любой участник кнопкой записи; у всех в звонке горит индикатор «REC», а вошедшим позже сообщается, что идёт запись. Сервер пишет звук каждого участника в свой файл Ogg/Opus без перекодирования. Запись останавливается кнопкой, когда канал пустует минуту (кто вернулся раньше, например после перезагрузки страницы, продолжает ту же запись), или через `max_hours`. Записи канала — кнопка **Recordings** в шапке канала. Кто запустил запись или есть в ней со своей дорожкой, найдёт её и в **My recordings** (кнопка рядом с настройками), в любом канале; так записи групповых звонков остаются доступны после удаления их канала. Админ видит все записи, включая личные звонки, и может переключить My recordings на **All**. Если сервер не может записать файл участника (например, кончился диск), он пробует снова через 10 секунд (клиента со звуком через WebSocket в этот момент просят перезапустить запись); звук в промежутке теряется. Решение — [ADR-0001](adr/0001-recording-and-transcription.md).
 
 Обычные звонки с Android идут через WebRTC, как у всех. Если Android-клиент вошёл без микрофона и включил его позже, звук идёт кусками MediaRecorder по WebSocket; он сохраняется в WebM как есть (у таких файлов проигрыватель не показывает общую длину). При старте записи сервер просит такие клиенты перезапустить MediaRecorder: заголовок контейнера есть только в начале потока; о каждом новом потоке клиент сообщает (`ws_media_stream`) перед его первым куском.
 
@@ -262,7 +262,7 @@ SQLite создаётся автоматически при первом зап�
 
 ### Хранилище
 
-Записи и расшифровки лежат там, где указывает `storage.backend`: в локальном каталоге (по умолчанию) или в любом S3-совместимом хранилище — AWS S3, Yandex Object Storage, Selectel, MinIO, SeaweedFS, Garage. Бакет должен существовать; Vocala проверяет его при старте, и если он недоступен, запись выключается с ошибкой в логе, а звонки работают. Пока идёт запись, файлы пишутся на локальный диск (`recording.tmp_dir`) и выгружаются, когда заканчивается дорожка участника. Если хранилище в этот момент недоступно, выгрузка повторяется несколько минут; не вышло — запись помечается как сбойная, файл остаётся на диске и догружается раз в 10 минут, пока не получится. Воспроизведение читает объект запросами с Range, поэтому перемотка работает. Префикс по умолчанию — `vocala/`; endpoint можно указать и как URL (`https://…`).
+Записи и расшифровки лежат там, где указывает `storage.backend`: в локальном каталоге (по умолчанию) или в любом S3-совместимом хранилище — AWS S3, Yandex Object Storage, Selectel, MinIO, SeaweedFS, Garage. Бакет должен существовать; Vocala проверяет его при старте. Нет бакета или неверные ключи — запись выключается с ошибкой в логе, а звонки работают; хранилище, которое ещё не отвечает (стартует), даёт только предупреждение, и выгрузки повторяются. Пока идёт запись, файлы пишутся на локальный диск (`recording.tmp_dir`) и выгружаются, когда заканчивается дорожка участника. Если хранилище в этот момент недоступно, выгрузка повторяется несколько минут; не вышло — запись помечается как сбойная, файл остаётся на диске и догружается раз в 10 минут, пока не получится. Воспроизведение читает объект запросами с Range, поэтому перемотка работает. Префикс по умолчанию — `vocala/`; endpoint можно указать и как URL (`https://…`).
 
 Смена хранилища не переносит старые записи: они остаются на прежнем месте, и проиграть их нельзя, пока строки не удалит срок хранения. Если они нужны — скопируйте их в новое хранилище под теми же ключами (`recordings/<id>/...`).
 

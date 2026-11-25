@@ -8,7 +8,7 @@ Self-hosted voice chat server with WebRTC SFU, text chat, webcam support, and ad
 - **Webcam support** -- Camera grid with per-user video streams
 - **Text chat** -- Persistent messages with emoji reactions in voice channels
 - **Screen sharing** -- Share your screen with live preview thumbnails
-- **Call recording** -- Server-side, one audio track per participant, 30-day retention
+- **Call recording** -- Server-side, one audio track per participant, 30-day retention (off by default, `VOCALA_RECORDING=true`)
 - **Transcripts** -- Self-hosted Whisper (speaches); the transcript knows who spoke
 - **Private channels** -- Invite-only channels with member management and invite links
 - **Guest access** -- Temporary guest invite links with channel-scoped guest sessions

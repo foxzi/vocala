@@ -42,6 +42,11 @@ func setupTranscription(m *recording.Manager, tmpDir string) {
 	w.OnReady(func(r recording.Recording) {
 		// No clock time here: the server's time zone (UTC in Docker) is not
 		// the readers'.
+		// Checked now: a long call takes longer to transcribe than a group
+		// call's channel lives.
+		if _, err := channel.GetByID(r.ChannelID); err != nil {
+			return // gone; the participants find it in My recordings
+		}
 		signaling.PostSystemMessage(r.ChannelID, fmt.Sprintf("📝 Transcript of the recording started by %s is ready — see Recordings", r.StartedBy))
 	})
 	m.OnRecorded(func(_ int64, recordingID int64) {
@@ -58,7 +63,8 @@ func setupTranscription(m *recording.Manager, tmpDir string) {
 	logger.Info("transcription: enabled, model %s via %s", cfg.Transcription.Model, cfg.Transcription.URL)
 }
 
-// recordingForMember returns the recording if the user may see it.
+// recordingForMember returns the recording if the user may see it
+// (canSeeRecording).
 func recordingForMember(w http.ResponseWriter, r *http.Request) (recording.Recording, bool) {
 	if recorder == nil {
 		http.NotFound(w, r)
@@ -80,7 +86,11 @@ func recordingForMember(w http.ResponseWriter, r *http.Request) (recording.Recor
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return rec, false
 	}
-	if !channel.CanJoin(rec.ChannelID, user.ID, user.IsAdmin) {
+	if ok, err := canSeeRecording(user, rec.ID, rec.ChannelID); err != nil {
+		logger.Error("recording access: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return rec, false
+	} else if !ok {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return rec, false
 	}

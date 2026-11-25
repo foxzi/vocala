@@ -23,3 +23,9 @@ auth:
   cookie_secure: false
   rate_limit_rps: 10
   rate_limit_burst: 20
+
+# Server-side call recording, off by default. See docs/configuration.md.
+recording:
+  enabled: false
+  max_hours: 4
+  retention_days: 30

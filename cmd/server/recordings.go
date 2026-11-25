@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/foxzi/vocala/internal/auth"
 	"github.com/foxzi/vocala/internal/channel"
 	"github.com/foxzi/vocala/internal/database"
 	"github.com/foxzi/vocala/internal/logger"
@@ -128,8 +129,23 @@ func storageDir() string {
 	return filepath.Join(filepath.Dir(cfg.Database.Path), "storage")
 }
 
-// handleRecordings lists a channel's recordings:
+// canSeeRecording: admins (every recording, DM calls included: decided
+// 25.11.2026), whoever may join the recording's channel, and
+// the recording's participants (a track in it, or started it). The last
+// keeps recordings of group calls reachable after the channel is removed.
+func canSeeRecording(user *auth.User, recordingID, channelID int64) (bool, error) {
+	if user.IsAdmin || channel.CanJoin(channelID, user.ID, false) {
+		return true, nil
+	}
+	return recorder.IsParticipant(recordingID, user.ID)
+}
+
+// handleRecordings lists a channel's recordings, with mine=1 the
+// recordings the user took part in, in any channel, and with all=1 (admins)
+// every recording:
 // GET /api/recordings?channel_id=N
+// GET /api/recordings?mine=1
+// GET /api/recordings?all=1
 func handleRecordings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -140,16 +156,30 @@ func handleRecordings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := userFromContext(r)
-	chID, err := strconv.ParseInt(r.URL.Query().Get("channel_id"), 10, 64)
-	if err != nil || chID <= 0 {
-		http.Error(w, "invalid channel_id", http.StatusBadRequest)
-		return
+	var list []recording.Recording
+	var err error
+	switch {
+	case r.URL.Query().Get("all") == "1":
+		if !user.IsAdmin {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		list, err = recorder.ListAll(recordingsListLimit)
+	case r.URL.Query().Get("mine") == "1":
+		list, err = recorder.ListForUser(user.ID, recordingsListLimit)
+	default:
+		chID, perr := strconv.ParseInt(r.URL.Query().Get("channel_id"), 10, 64)
+		if perr != nil || chID <= 0 {
+			http.Error(w, "invalid channel_id", http.StatusBadRequest)
+			return
+		}
+		// Admins see every recording, DM calls included (canSeeRecording).
+		if !user.IsAdmin && !channel.CanJoin(chID, user.ID, false) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		list, err = recorder.List(chID, recordingsListLimit)
 	}
-	if !channel.CanJoin(chID, user.ID, user.IsAdmin) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	list, err := recorder.List(chID, recordingsListLimit)
 	if err != nil {
 		logger.Error("list recordings: %v", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
@@ -190,11 +220,29 @@ func handleRecordingAudio(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	if !channel.CanJoin(chID, user.ID, user.IsAdmin) {
+	if ok, err := canSeeRecording(user, recID, chID); err != nil {
+		logger.Error("recording audio: %v", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	} else if !ok {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	// A stored segment never changes, so its id is its version. A browser
+	// that has it gets 304 before the storage (maybe S3) is asked.
+	etag := `"seg-` + strconv.FormatInt(segID, 10) + `"`
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	rc, format, err := recorder.OpenSegment(r.Context(), recID, segID)
+	if err != nil {
+		// An error must not be cached for a day and confirmed by 304s.
+		w.Header().Del("ETag")
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	if errors.Is(err, recording.ErrNotFound) || errors.Is(err, storage.ErrNotFound) {
 		http.NotFound(w, r)
 		return
@@ -209,11 +257,22 @@ func handleRecordingAudio(w http.ResponseWriter, r *http.Request) {
 	name := "recording-" + strconv.FormatInt(recID, 10) + "-" + strconv.FormatInt(segID, 10) + "." + format
 	w.Header().Set("Content-Type", "audio/"+format) // ogg, webm or mp4
 	w.Header().Set("Content-Disposition", `inline; filename="`+name+`"`)
-	w.Header().Set("Cache-Control", "private, max-age=3600")
 	if rs, ok := rc.(io.ReadSeeker); ok {
 		// Range requests let the browser seek inside the recording.
 		http.ServeContent(w, r, name, time.Time{}, rs)
 		return
 	}
 	io.Copy(w, rc)
+}
+
+// etagMatches reports whether an If-None-Match header names etag: a list,
+// a weak tag (W/"…") or "*" count, as in http.ServeContent.
+func etagMatches(header, etag string) bool {
+	for _, tag := range strings.Split(header, ",") {
+		tag = strings.TrimPrefix(strings.TrimSpace(tag), "W/")
+		if tag == etag || tag == "*" {
+			return true
+		}
+	}
+	return false
 }

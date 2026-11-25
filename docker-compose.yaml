@@ -9,6 +9,9 @@ services:
       - "40000-40200:40000-40200/udp"
       - "40201:40201/tcp"
     environment:
+      # Call recording is off unless VOCALA_RECORDING=true is set in .env
+      # (or recording.enabled in config.yaml).
+      VOCALA_RECORDING: ${VOCALA_RECORDING:-}
       # Call transcription: set VOCALA_STT_URL=http://whisper:8000 in .env
       # and start with `docker compose --profile stt up -d`.
       VOCALA_STT_URL: ${VOCALA_STT_URL:-}

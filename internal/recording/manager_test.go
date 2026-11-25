@@ -646,3 +646,149 @@ func TestRecoveryKeepsSegmentWhenStorageErrs(t *testing.T) {
 		t.Fatalf("after storage recovered: %+v", list[0])
 	}
 }
+
+// A disk error loses the audio of a few seconds, not the rest of the
+// participant's recording.
+func TestDiskErrorRetriesAfterAWhile(t *testing.T) {
+	old := diskRetry
+	diskRetry = 50 * time.Millisecond
+	t.Cleanup(func() { diskRetry = old })
+	f := newFixture(t)
+
+	st, err := f.m.Start(7, 1, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A file where the session's directory should be: nothing can be opened.
+	blocker := f.m.sessionTmpDir(st.RecordingID)
+	os.MkdirAll(filepath.Dir(blocker), 0o750)
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	talk(t, f.m, 7, 1, "alice", "a", 0, 50)
+	time.Sleep(200 * time.Millisecond) // the writer tries and fails
+	os.Remove(blocker)
+	removed := time.Now()
+	time.Sleep(100 * time.Millisecond) // past diskRetry
+	talk(t, f.m, 7, 1, "alice", "a", 5*48000, 50)
+
+	if err := f.m.Stop(7); err != nil {
+		t.Fatal(err)
+	}
+	f.m.Wait()
+	rec, err := f.m.Get(st.RecordingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Status != StatusReady || len(rec.Segments) != 1 {
+		t.Fatalf("status %s with %d segments, want ready with the audio after the error", rec.Status, len(rec.Segments))
+	}
+	// The file was opened after the disk recovered: the first batch really
+	// hit the error (a slow writer would have opened it before).
+	if rec.Segments[0].StartedAt < removed.UnixMilli() {
+		t.Fatalf("segment started %d ms before the disk recovered: the error path never ran",
+			removed.UnixMilli()-rec.Segments[0].StartedAt)
+	}
+}
+
+// When nothing could be written at all, the recording stays as failed
+// instead of vanishing as empty.
+func TestDiskErrorThroughoutIsFailed(t *testing.T) {
+	f := newFixture(t)
+	st, err := f.m.Start(7, 1, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker := f.m.sessionTmpDir(st.RecordingID)
+	os.MkdirAll(filepath.Dir(blocker), 0o750)
+	os.WriteFile(blocker, nil, 0o600)
+	talk(t, f.m, 7, 1, "alice", "a", 0, 50)
+	if err := f.m.Stop(7); err != nil {
+		t.Fatal(err)
+	}
+	f.m.Wait()
+	os.Remove(blocker)
+	rec, err := f.m.Get(st.RecordingID)
+	if err != nil {
+		t.Fatalf("recording gone: %v", err)
+	}
+	if rec.Status != StatusFailed {
+		t.Fatalf("status %s, want failed", rec.Status)
+	}
+}
+
+// Participants keep their recordings when the channel is gone: My
+// recordings lists them and IsParticipant grants access.
+func TestRecordingsOfParticipants(t *testing.T) {
+	f := newFixture(t)
+	database.DB.Exec(`INSERT INTO users (id, username, password_hash) VALUES (1, 'alice', '-')`)
+	res, err := database.DB.Exec(`INSERT INTO channels (name, created_by, is_private, is_ephemeral, is_group) VALUES ('Group-1', 1, 1, 1, 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chID, _ := res.LastInsertId()
+	st, err := f.m.Start(chID, 1, "alice") // alice starts, bob speaks, carol is silent
+	if err != nil {
+		t.Fatal(err)
+	}
+	talk(t, f.m, chID, 2, "bob", "b", 0, 50)
+	f.m.Stop(chID)
+	f.m.Wait()
+
+	for user, want := range map[int64]bool{1: true, 2: true, 3: false} {
+		ok, err := f.m.IsParticipant(st.RecordingID, user)
+		if err != nil || ok != want {
+			t.Errorf("IsParticipant(user %d) = %v, %v; want %v", user, ok, err, want)
+		}
+		list, err := f.m.ListForUser(user, 10)
+		if err != nil || (len(list) == 1) != want {
+			t.Errorf("ListForUser(%d) = %d recordings, %v; want listed: %v", user, len(list), err, want)
+		}
+	}
+	list, _ := f.m.ListForUser(2, 10)
+	if list[0].ChannelKind != "group" || list[0].ChannelName != "Group-1" {
+		t.Errorf("channel = %s %q, want group Group-1", list[0].ChannelKind, list[0].ChannelName)
+	}
+
+	// The group call's channel is removed an hour after it empties.
+	database.DB.Exec(`DELETE FROM channels WHERE id = ?`, chID)
+	if ok, _ := f.m.IsParticipant(st.RecordingID, 2); !ok {
+		t.Error("bob lost access with the channel")
+	}
+	rec, err := f.m.Get(st.RecordingID)
+	if err != nil || rec.ChannelKind != "deleted" || len(rec.Segments) != 1 {
+		t.Errorf("after channel deletion: %+v, %v", rec, err)
+	}
+}
+
+// A WebSocket stream cannot resume mid-stream after a disk error: the
+// client is asked for a new stream once diskRetry has passed.
+func TestDiskErrorAsksWebSocketClientForNewStream(t *testing.T) {
+	old := diskRetry
+	diskRetry = 50 * time.Millisecond
+	t.Cleanup(func() { diskRetry = old })
+	f := newFixture(t)
+	asked := make(chan [2]int64, 1)
+	f.m.OnStreamBroken(func(ch, user int64) { asked <- [2]int64{ch, user} })
+
+	st, err := f.m.Start(1, 5, "phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker := f.m.sessionTmpDir(st.RecordingID)
+	os.MkdirAll(filepath.Dir(blocker), 0o750)
+	os.WriteFile(blocker, nil, 0o600)
+	f.m.MediaStreamStarted(1, "ws-5", "webm")
+	f.m.MediaChunk(1, 5, "phone", "ws-5", []byte{0x1A})
+	select {
+	case got := <-asked:
+		if got != [2]int64{1, 5} {
+			t.Fatalf("asked %v, want channel 1 user 5", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the client was never asked for a new stream")
+	}
+	os.Remove(blocker)
+	f.m.Stop(1)
+	f.m.Wait()
+}

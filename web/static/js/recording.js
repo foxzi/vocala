@@ -49,7 +49,7 @@ async function toggleRecording() {
         return;
     }
     const ok = await confirmModal(
-        `Start recording this call?\nEveryone in the call will see that it is being recorded. The recording is available to the channel members${recordingKeptFor()}.`,
+        `Start recording this call?\nEveryone in the call will see that it is being recorded. The recording is available to the channel members and to everyone who speaks in it${recordingKeptFor()}.`,
         { okText: 'Start recording' });
     if (ok) sendWS({ type: 'recording_start' });
 }
@@ -148,12 +148,21 @@ function formatRecordingDuration(ms) {
 async function refreshRecordings(body) {
     if (!document.body.contains(body)) return; // modal closed
     try {
-        const res = await fetch(`/api/recordings?channel_id=${encodeURIComponent(body.dataset.channelId)}`, { credentials: 'same-origin' });
+        const res = await fetch(`/api/recordings?${body.dataset.query}`, { credentials: 'same-origin' });
         if (res.ok) renderRecordingsList(body, await res.json());
     } catch (_) {}
 }
 
+// My recordings: the ones the user took part in, in any channel, also
+// after a group call's channel is gone.
+function openMyRecordings() {
+    openRecordings(null);
+}
+
+// openRecordings shows a channel's recordings, or with a null channel the
+// user's own.
 async function openRecordings(channelID) {
+    const mine = channelID === null;
     const existing = document.getElementById('recordings-modal');
     if (existing) existing.remove();
 
@@ -163,7 +172,11 @@ async function openRecordings(channelID) {
     modal.innerHTML = `
         <div class="bg-vc-sidebar border border-vc-border rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col">
             <div class="px-5 py-3 border-b border-vc-border flex items-center">
-                <h3 class="font-semibold text-vc-text">Recordings</h3>
+                <h3 class="font-semibold text-vc-text">${mine ? 'My recordings' : 'Recordings'}</h3>
+                ${mine && window.VOCALA_IS_ADMIN ? `<div class="ml-3 flex text-xs rounded-lg border border-vc-border overflow-hidden">
+                    <button data-scope="mine=1" class="px-2 py-1 bg-vc-hover text-vc-text">Mine</button>
+                    <button data-scope="all=1" class="px-2 py-1 text-vc-muted hover:text-vc-text" title="Every recording on the server (admin)">All</button>
+                </div>` : ''}
                 <button data-act="close" class="ml-auto text-vc-muted hover:text-vc-text transition" title="Close">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
@@ -182,9 +195,23 @@ async function openRecordings(channelID) {
     document.body.appendChild(modal);
 
     const body = modal.querySelector('#recordings-body');
-    body.dataset.channelId = channelID;
+    body.dataset.query = mine ? 'mine=1' : `channel_id=${encodeURIComponent(channelID)}`;
+    body.dataset.mine = mine ? '1' : '';
+    // Admins switch My recordings to every recording on the server.
+    modal.querySelectorAll('[data-scope]').forEach(btn => btn.addEventListener('click', () => {
+        modal.querySelectorAll('[data-scope]').forEach(b => {
+            const on = b === btn;
+            b.classList.toggle('bg-vc-hover', on);
+            b.classList.toggle('text-vc-text', on);
+            b.classList.toggle('text-vc-muted', !on);
+        });
+        modal.querySelector('h3').textContent = btn.dataset.scope === 'all=1' ? 'All recordings' : 'My recordings';
+        body.dataset.query = btn.dataset.scope;
+        body.textContent = 'Loading…';
+        refreshRecordings(body);
+    }));
     try {
-        const res = await fetch(`/api/recordings?channel_id=${encodeURIComponent(channelID)}`, { credentials: 'same-origin' });
+        const res = await fetch(`/api/recordings?${body.dataset.query}`, { credentials: 'same-origin' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         renderRecordingsList(body, await res.json());
     } catch (err) {
@@ -201,17 +228,32 @@ function renderRecordingsList(body, recordings) {
     if (recordings.some(r => r.transcript_status === 'pending' || r.transcript_status === 'running')) {
         recordingsPoll = setTimeout(() => refreshRecordings(body), 10000);
     }
+    const mine = !!body.dataset.mine;
     if (!recordings.length) {
-        body.textContent = 'No recordings yet. Start one with the record button in a call.';
+        body.textContent = body.dataset.query === 'all=1'
+            ? 'No recordings on this server.'
+            : mine
+            ? 'No recordings with you yet. Recordings you started or spoke in appear here.'
+            : 'No recordings yet. Start one with the record button in a call.';
         return;
     }
     body.innerHTML = '';
     for (const rec of recordings) {
-        body.appendChild(renderRecording(rec));
+        body.appendChild(renderRecording(rec, mine));
     }
 }
 
-function renderRecording(rec) {
+// recordingChannelLabel names where a recording was made, for My recordings.
+function recordingChannelLabel(rec) {
+    switch (rec.channel_kind) {
+        case 'channel': return `#${rec.channel_name}`;
+        case 'dm': return 'Direct call';
+        case 'group': return 'Group call';
+        default: return 'Deleted channel';
+    }
+}
+
+function renderRecording(rec, showChannel) {
     const card = document.createElement('div');
     card.className = 'border border-vc-border rounded-lg p-3 bg-vc-bg/40';
 
@@ -224,7 +266,8 @@ function renderRecording(rec) {
 
     card.innerHTML = `
         <div class="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-            <span class="font-medium text-vc-text">${escapeHTML(started.toLocaleString())}</span>
+            ${showChannel ? `<span class="font-medium text-vc-text">${escapeHTML(recordingChannelLabel(rec))}</span>` : ''}
+            <span class="${showChannel ? '' : 'font-medium text-vc-text'}">${escapeHTML(started.toLocaleString())}</span>
             ${duration ? `<span class="text-xs">${duration}</span>` : ''}
             ${statusBadge}
             <span class="text-xs ml-auto">started by ${escapeHTML(rec.started_by)}</span>

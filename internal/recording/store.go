@@ -22,6 +22,12 @@ type Recording struct {
 	Status    string    `json:"status"`
 	Segments  []Segment `json:"segments"`
 
+	// ChannelName is empty and ChannelKind "deleted" once the channel is
+	// gone (group calls are removed an hour after they empty). Kinds:
+	// channel, dm, group, deleted.
+	ChannelName string `json:"channel_name"`
+	ChannelKind string `json:"channel_kind"`
+
 	// TranscriptStatus is "" (never transcribed), pending, running, ready
 	// or failed.
 	TranscriptStatus string `json:"transcript_status"`
@@ -38,21 +44,56 @@ type Segment struct {
 	key        string
 }
 
+// recordingColumns selects a Recording with its channel; scanRecording
+// reads them.
+const recordingColumns = `r.id, r.channel_id, r.started_by_name, r.started_at_ms, r.ended_at_ms, r.status, r.transcript_status,
+	COALESCE(c.name, ''), c.id IS NOT NULL, COALESCE(c.is_dm, 0), COALESCE(c.is_ephemeral, 0)
+	FROM recordings r LEFT JOIN channels c ON c.id = r.channel_id`
+
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanRecording(row rowScanner) (Recording, error) {
+	var r Recording
+	var exists, dm, ephemeral bool
+	if err := row.Scan(&r.ID, &r.ChannelID, &r.StartedBy, &r.StartedAt, &r.EndedAt, &r.Status, &r.TranscriptStatus,
+		&r.ChannelName, &exists, &dm, &ephemeral); err != nil {
+		return r, err
+	}
+	switch {
+	case !exists:
+		r.ChannelKind = "deleted"
+	case dm:
+		r.ChannelKind = "dm"
+	case ephemeral:
+		r.ChannelKind = "group"
+	default:
+		r.ChannelKind = "channel"
+	}
+	return r, nil
+}
+
 // List returns the channel's recordings, newest first, with the segments
 // that are already in storage.
 func (m *Manager) List(channelID int64, limit int) ([]Recording, error) {
-	rows, err := m.db.Query(
-		`SELECT id, channel_id, started_by_name, started_at_ms, ended_at_ms, status, transcript_status
-		 FROM recordings WHERE channel_id = ? ORDER BY started_at_ms DESC LIMIT ?`,
-		channelID, limit,
-	)
+	return m.list(`WHERE r.channel_id = ?`, channelID, limit)
+}
+
+// ListForUser returns the recordings the user took part in (has a track
+// in) or started, in any channel, including deleted ones.
+func (m *Manager) ListForUser(userID int64, limit int) ([]Recording, error) {
+	return m.list(`WHERE r.started_by_id = ? OR EXISTS (SELECT 1 FROM recording_segments s WHERE s.recording_id = r.id AND s.user_id = ?)`,
+		userID, userID, limit)
+}
+
+func (m *Manager) list(where string, args ...any) ([]Recording, error) {
+	rows, err := m.db.Query(`SELECT `+recordingColumns+` `+where+` ORDER BY r.started_at_ms DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
 	var out []Recording
 	for rows.Next() {
-		var r Recording
-		if err := rows.Scan(&r.ID, &r.ChannelID, &r.StartedBy, &r.StartedAt, &r.EndedAt, &r.Status, &r.TranscriptStatus); err != nil {
+		r, err := scanRecording(rows)
+		if err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -68,6 +109,27 @@ func (m *Manager) List(channelID int64, limit int) ([]Recording, error) {
 		}
 	}
 	return out, nil
+}
+
+// ListAll returns every recording on the server, for admins.
+func (m *Manager) ListAll(limit int) ([]Recording, error) {
+	return m.list(``, limit)
+}
+
+// IsParticipant reports whether the user started the recording or has a
+// track in it. Such a user keeps access when the channel is gone or they
+// are no longer its member.
+func (m *Manager) IsParticipant(recordingID, userID int64) (bool, error) {
+	var one int
+	err := m.db.QueryRow(
+		`SELECT 1 FROM recordings r WHERE r.id = ? AND (r.started_by_id = ?
+		 OR EXISTS (SELECT 1 FROM recording_segments s WHERE s.recording_id = r.id AND s.user_id = ?))`,
+		recordingID, userID, userID,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (m *Manager) segments(recordingID int64) ([]Segment, error) {

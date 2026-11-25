@@ -223,6 +223,16 @@ var hallucinations = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)спасибо за просмотр[.!]*`),
 	regexp.MustCompile(`(?i)подписывайтесь на (наш )?канал[.!]*`),
 	regexp.MustCompile(`(?i)dimatorzok`),
+	regexp.MustCompile(`(?i)subtitles by the amara\.org community[.!]*`),
+}
+
+// wholeHallucinations are dropped only when they are the whole phrase:
+// people do say "thanks for watching the demo" in a call. A bare
+// "Thank you." is left alone, it is said for real far too often.
+var wholeHallucinations = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^(thank you|thanks)( (so|very) much)? for watching[.!]*$`),
+	regexp.MustCompile(`(?i)^(please )?(like and )?subscribe( to (my|our|the) channel)?[.!]*$`),
+	regexp.MustCompile(`(?i)^see you in the next (video|one)[.!]*$`),
 }
 
 // Clean removes hallucinations and extra whitespace.
@@ -230,5 +240,11 @@ func Clean(text string) string {
 	for _, pattern := range hallucinations {
 		text = pattern.ReplaceAllString(text, " ")
 	}
-	return strings.Join(strings.Fields(text), " ")
+	text = strings.Join(strings.Fields(text), " ")
+	for _, pattern := range wholeHallucinations {
+		if pattern.MatchString(text) {
+			return ""
+		}
+	}
+	return text
 }

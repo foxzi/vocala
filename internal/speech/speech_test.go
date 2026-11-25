@@ -113,10 +113,15 @@ func TestNewWithoutURLIsDisabled(t *testing.T) {
 
 func TestClean(t *testing.T) {
 	cases := map[string]string{
-		"Субтитры сделал DimaTorzok":            "",
-		"Итак. Продолжение следует...":          "Итак.",
-		"Редактор субтитров А.Синецкая\nДальше": "Дальше",
-		"  обычная   речь ":                     "обычная речь",
+		"Субтитры сделал DimaTorzok":               "",
+		"Итак. Продолжение следует...":             "Итак.",
+		"Редактор субтитров А.Синецкая\nДальше":    "Дальше",
+		"  обычная   речь ":                        "обычная речь",
+		"Thank you for watching!":                  "",
+		"Thanks for watching the demo.":            "Thanks for watching the demo.",
+		"Please subscribe to my channel.":          "",
+		"Thank you.":                               "Thank you.",
+		"Ok. Subtitles by the Amara.org community": "Ok.",
 	}
 	for in, want := range cases {
 		if got := Clean(in); got != want {

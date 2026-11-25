@@ -164,6 +164,9 @@ func migrate() {
 		`ALTER TABLE recordings ADD COLUMN transcript_status TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE recordings ADD COLUMN transcript_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE recordings ADD COLUMN transcript_attempts INTEGER NOT NULL DEFAULT 0`,
+		// My recordings: by who started it, or whose track is in it.
+		`CREATE INDEX IF NOT EXISTS idx_recordings_started_by ON recordings(started_by_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_recording_segments_user ON recording_segments(user_id)`,
 	}
 	for _, q := range migrations {
 		DB.Exec(q) // ignore errors if columns already exist
