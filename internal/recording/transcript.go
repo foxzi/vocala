@@ -33,11 +33,7 @@ func (m *Manager) recorded(channelID, recordingID int64) {
 
 // Get returns one recording with its stored segments.
 func (m *Manager) Get(recordingID int64) (Recording, error) {
-	var r Recording
-	err := m.db.QueryRow(
-		`SELECT id, channel_id, started_by_name, started_at_ms, ended_at_ms, status, transcript_status
-		 FROM recordings WHERE id = ?`, recordingID,
-	).Scan(&r.ID, &r.ChannelID, &r.StartedBy, &r.StartedAt, &r.EndedAt, &r.Status, &r.TranscriptStatus)
+	r, err := scanRecording(m.db.QueryRow(`SELECT `+recordingColumns+` WHERE r.id = ?`, recordingID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}

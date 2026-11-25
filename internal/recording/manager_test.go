@@ -646,3 +646,110 @@ func TestRecoveryKeepsSegmentWhenStorageErrs(t *testing.T) {
 		t.Fatalf("after storage recovered: %+v", list[0])
 	}
 }
+
+// A disk error loses the audio of a few seconds, not the rest of the
+// participant's recording.
+func TestDiskErrorRetriesAfterAWhile(t *testing.T) {
+	old := diskRetry
+	diskRetry = 50 * time.Millisecond
+	t.Cleanup(func() { diskRetry = old })
+	f := newFixture(t)
+
+	st, err := f.m.Start(7, 1, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A file where the session's directory should be: nothing can be opened.
+	blocker := f.m.sessionTmpDir(st.RecordingID)
+	os.MkdirAll(filepath.Dir(blocker), 0o750)
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	talk(t, f.m, 7, 1, "alice", "a", 0, 50)
+	time.Sleep(200 * time.Millisecond) // the writer tries and fails
+	os.Remove(blocker)
+	time.Sleep(100 * time.Millisecond) // past diskRetry
+	talk(t, f.m, 7, 1, "alice", "a", 5*48000, 50)
+
+	if err := f.m.Stop(7); err != nil {
+		t.Fatal(err)
+	}
+	f.m.Wait()
+	rec, err := f.m.Get(st.RecordingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Status != StatusReady || len(rec.Segments) != 1 {
+		t.Fatalf("status %s with %d segments, want ready with the audio after the error", rec.Status, len(rec.Segments))
+	}
+}
+
+// When nothing could be written at all, the recording stays as failed
+// instead of vanishing as empty.
+func TestDiskErrorThroughoutIsFailed(t *testing.T) {
+	f := newFixture(t)
+	st, err := f.m.Start(7, 1, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker := f.m.sessionTmpDir(st.RecordingID)
+	os.MkdirAll(filepath.Dir(blocker), 0o750)
+	os.WriteFile(blocker, nil, 0o600)
+	talk(t, f.m, 7, 1, "alice", "a", 0, 50)
+	if err := f.m.Stop(7); err != nil {
+		t.Fatal(err)
+	}
+	f.m.Wait()
+	os.Remove(blocker)
+	rec, err := f.m.Get(st.RecordingID)
+	if err != nil {
+		t.Fatalf("recording gone: %v", err)
+	}
+	if rec.Status != StatusFailed {
+		t.Fatalf("status %s, want failed", rec.Status)
+	}
+}
+
+// Participants keep their recordings when the channel is gone: My
+// recordings lists them and IsParticipant grants access.
+func TestRecordingsOfParticipants(t *testing.T) {
+	f := newFixture(t)
+	database.DB.Exec(`INSERT INTO users (id, username, password_hash) VALUES (1, 'alice', '-')`)
+	res, err := database.DB.Exec(`INSERT INTO channels (name, created_by, is_private, is_ephemeral, is_group) VALUES ('Group-1', 1, 1, 1, 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chID, _ := res.LastInsertId()
+	st, err := f.m.Start(chID, 1, "alice") // alice starts, bob speaks, carol is silent
+	if err != nil {
+		t.Fatal(err)
+	}
+	talk(t, f.m, chID, 2, "bob", "b", 0, 50)
+	f.m.Stop(chID)
+	f.m.Wait()
+
+	for user, want := range map[int64]bool{1: true, 2: true, 3: false} {
+		ok, err := f.m.IsParticipant(st.RecordingID, user)
+		if err != nil || ok != want {
+			t.Errorf("IsParticipant(user %d) = %v, %v; want %v", user, ok, err, want)
+		}
+		list, err := f.m.ListForUser(user, 10)
+		if err != nil || (len(list) == 1) != want {
+			t.Errorf("ListForUser(%d) = %d recordings, %v; want listed: %v", user, len(list), err, want)
+		}
+	}
+	list, _ := f.m.ListForUser(2, 10)
+	if list[0].ChannelKind != "group" || list[0].ChannelName != "Group-1" {
+		t.Errorf("channel = %s %q, want group Group-1", list[0].ChannelKind, list[0].ChannelName)
+	}
+
+	// The group call's channel is removed an hour after it empties.
+	database.DB.Exec(`DELETE FROM channels WHERE id = ?`, chID)
+	if ok, _ := f.m.IsParticipant(st.RecordingID, 2); !ok {
+		t.Error("bob lost access with the channel")
+	}
+	rec, err := f.m.Get(st.RecordingID)
+	if err != nil || rec.ChannelKind != "deleted" || len(rec.Segments) != 1 {
+		t.Errorf("after channel deletion: %+v, %v", rec, err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/foxzi/vocala/internal/channel"
@@ -144,14 +145,55 @@ func handleRecordingStop(c *Client) {
 	}
 }
 
+// emptyGrace is how long a recording outlives an empty channel: a page
+// reload or a network blip of the last participant must not end it.
+var emptyGrace = 60 * time.Second
+
+// emptyWaits holds the pending stop of each empty channel's recording.
+var (
+	emptyTimersMu sync.Mutex
+	emptyTimers   = map[int64]*emptyWait{}
+)
+
+type emptyWait struct{ timer *time.Timer }
+
 // channelUsersChanged publishes the channel's participants and stops its
-// recording once the last one has left.
+// recording once the channel has stayed empty for emptyGrace.
 func channelUsersChanged(channelID int64) {
 	broadcastChannelUpdate(channelID)
-	if recorder != nil && len(channel.GetUsers(channelID)) == 0 {
-		if err := recorder.Stop(channelID); err != nil && !errors.Is(err, recording.ErrNotRecording) {
-			logger.Error("signaling: stop recording in empty channel %d: %v", channelID, err)
-		}
+	if recorder == nil || len(channel.GetUsers(channelID)) > 0 {
+		return
+	}
+	// Each time the channel empties the wait starts over; whoever comes
+	// back in time keeps the recording going (the stop re-checks).
+	emptyTimersMu.Lock()
+	defer emptyTimersMu.Unlock()
+	if w := emptyTimers[channelID]; w != nil {
+		w.timer.Stop()
+	}
+	w := &emptyWait{}
+	w.timer = time.AfterFunc(emptyGrace, func() { stopIfStillEmpty(channelID, w) })
+	emptyTimers[channelID] = w
+}
+
+func stopIfStillEmpty(channelID int64, w *emptyWait) {
+	emptyTimersMu.Lock()
+	current := emptyTimers[channelID] == w
+	if current {
+		delete(emptyTimers, channelID)
+	}
+	rec := recorder
+	emptyTimersMu.Unlock()
+	if !current || rec == nil {
+		return // the channel emptied again since; a newer wait is pending
+	}
+	if len(channel.GetUsers(channelID)) > 0 {
+		return
+	}
+	if err := rec.Stop(channelID); err == nil {
+		logger.Info("signaling: channel %d stayed empty, recording stopped", channelID)
+	} else if !errors.Is(err, recording.ErrNotRecording) {
+		logger.Error("signaling: stop recording in empty channel %d: %v", channelID, err)
 	}
 }
 

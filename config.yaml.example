@@ -80,7 +80,7 @@ storage:
 
 # Server-side call recording: one Ogg/Opus file per participant.
 recording:
-  enabled: true             # VOCALA_RECORDING=false disables it
+  enabled: false            # off by default; VOCALA_RECORDING=true enables it
   tmp_dir: ""               # files being written; default <storage.local.dir>/tmp
   max_hours: 4              # stop a forgotten recording (0 = no limit)
   retention_days: 30        # delete older recordings (0 = keep forever)

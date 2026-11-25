@@ -150,7 +150,9 @@ func Default() *Config {
 			S3:      S3StorageConfig{Prefix: "vocala/"},
 		},
 		Recording: RecordingConfig{
-			Enabled:       true,
+			// Off until the admin turns it on: recording people's
+			// voices is a decision for the server's owner.
+			Enabled:       false,
 			MaxHours:      4,
 			RetentionDays: 30,
 		},
