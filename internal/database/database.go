@@ -135,6 +135,31 @@ func migrate() {
 			last_read_at INTEGER NOT NULL DEFAULT 0,
 			PRIMARY KEY (user_id, channel_id)
 		)`,
+		// Call recordings (docs/adr/0001-recording-and-transcription.md).
+		// Times are unix milliseconds: segments of different participants
+		// are aligned on them.
+		`CREATE TABLE IF NOT EXISTS recordings (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			channel_id INTEGER NOT NULL,
+			started_by_id INTEGER NOT NULL,
+			started_by_name TEXT NOT NULL,
+			started_at_ms INTEGER NOT NULL,
+			ended_at_ms INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_recordings_channel ON recordings(channel_id, started_at_ms)`,
+		`CREATE TABLE IF NOT EXISTS recording_segments (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			recording_id INTEGER NOT NULL REFERENCES recordings(id) ON DELETE CASCADE,
+			user_id INTEGER NOT NULL,
+			display_name TEXT NOT NULL,
+			started_at_ms INTEGER NOT NULL,
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			storage_key TEXT NOT NULL,
+			format TEXT NOT NULL,
+			stored INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_recording_segments_recording ON recording_segments(recording_id)`,
 	}
 	for _, q := range migrations {
 		DB.Exec(q) // ignore errors if columns already exist

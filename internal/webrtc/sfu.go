@@ -47,8 +47,9 @@ type Peer struct {
 
 // SFU manages all peer connections for a channel.
 type SFU struct {
-	mu    sync.RWMutex
-	peers map[int64]*Peer
+	channelID int64
+	mu        sync.RWMutex
+	peers     map[int64]*Peer
 
 	SendMessage func(userID int64, msg []byte)
 }
@@ -69,6 +70,22 @@ var (
 	udpPortMax uint16
 	iceTCPPort uint16 = 40201
 )
+
+// AudioRecorder receives every incoming audio RTP packet, so a channel can
+// be recorded without touching the forwarding path. trackKey identifies one
+// incoming track for its whole life; AudioTrackEnded closes it.
+type AudioRecorder interface {
+	AudioPacket(channelID, userID int64, username, trackKey string, packet []byte)
+	AudioTrackEnded(channelID int64, trackKey string)
+}
+
+var audioRecorder AudioRecorder
+
+// SetAudioRecorder installs the recorder. Call it before the server accepts
+// connections.
+func SetAudioRecorder(r AudioRecorder) {
+	audioRecorder = r
+}
 
 func SetNATIP(ip string) {
 	natIP = ip
@@ -239,7 +256,7 @@ func GetOrCreateSFU(channelID int64, sendMsg func(userID int64, msg []byte)) *SF
 	if s, ok := sfus[channelID]; ok {
 		return s
 	}
-	s := &SFU{peers: make(map[int64]*Peer), SendMessage: sendMsg}
+	s := &SFU{channelID: channelID, peers: make(map[int64]*Peer), SendMessage: sendMsg}
 	sfus[channelID] = s
 	return s
 }
@@ -685,7 +702,13 @@ func (s *SFU) handleAudioTrack(peer *Peer, userID int64, username string, track 
 	}
 	s.mu.RUnlock()
 
-	s.forwardRTP(track, userID, "audio", 1500)
+	var tap func([]byte)
+	if rec := audioRecorder; rec != nil {
+		trackKey := randomID()
+		tap = func(pkt []byte) { rec.AudioPacket(s.channelID, userID, username, trackKey, pkt) }
+		defer rec.AudioTrackEnded(s.channelID, trackKey)
+	}
+	s.forwardRTP(track, userID, "audio", 1500, tap)
 }
 
 func (s *SFU) handleScreenTrack(peer *Peer, userID int64, username string, track *webrtc.TrackRemote) {
@@ -708,7 +731,7 @@ func (s *SFU) handleScreenTrack(peer *Peer, userID int64, username string, track
 	s.mu.RUnlock()
 
 	s.sendPLI(peer, track)
-	s.forwardRTP(track, userID, "screen", 4096)
+	s.forwardRTP(track, userID, "screen", 4096, nil)
 
 	// Track ended — cleanup
 	logger.Info("webrtc: screen track ended for user %d", userID)
@@ -743,7 +766,7 @@ func (s *SFU) handleCameraTrack(peer *Peer, userID int64, username string, track
 	s.mu.RUnlock()
 
 	s.sendPLI(peer, track)
-	s.forwardRTP(track, userID, "camera", 4096)
+	s.forwardRTP(track, userID, "camera", 4096, nil)
 
 	// Track ended — cleanup
 	logger.Info("webrtc: camera track ended for user %d", userID)
@@ -760,13 +783,18 @@ func (s *SFU) handleCameraTrack(peer *Peer, userID int64, username string, track
 
 // --- Helpers ---
 
-func (s *SFU) forwardRTP(track *webrtc.TrackRemote, userID int64, kind string, bufSize int) {
+// forwardRTP copies the track's packets to every other peer until the track
+// ends. tap, if set, sees each packet first.
+func (s *SFU) forwardRTP(track *webrtc.TrackRemote, userID int64, kind string, bufSize int, tap func([]byte)) {
 	buf := make([]byte, bufSize)
 	for {
 		n, _, err := track.Read(buf)
 		if err != nil {
 			logger.Info("webrtc: %s track read ended for user %d: %v", kind, userID, err)
 			return
+		}
+		if tap != nil {
+			tap(buf[:n])
 		}
 		s.mu.RLock()
 		for otherID, op := range s.peers {

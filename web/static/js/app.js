@@ -417,6 +417,9 @@ function handleWSMessage(msg) {
         case 'screen_preview':
             screenShareUsername = msg.username || null;
             break;
+        case 'recording_state':
+            handleRecordingState(msg);
+            break;
         case 'screen_preview_clear':
             screenShareUsername = null;
             removeRemoteVideo();
@@ -749,7 +752,9 @@ function joinChannel(channelID, channelName, opts) {
                     <div class="w-2 h-2 rounded-full bg-vc-yellow animate-pulse"></div>
                     <span class="text-xs text-vc-yellow">Connecting...</span>
                 </div>
+                ${recordingIndicatorHTML()}
                 <div class="ml-auto flex items-center gap-2">
+                    ${recordingsButtonHTML(channelID)}
                     ${window.VOCALA_GUEST_CHANNEL ? '' : `<button onclick="createGuestLink(${channelID})" class="px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-muted hover:text-vc-text text-xs md:text-sm rounded-lg transition flex-shrink-0 border border-vc-border" title="Generate guest invite link">
                         Guest Link
                     </button>`}
@@ -819,6 +824,7 @@ function joinChannel(channelID, channelName, opts) {
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
                         </svg>
                     </button>
+                    ${recordButtonHTML()}
                     <button onclick="showBarReactionPicker(this)" id="bar-react-btn" title="Send reaction"
                         class="flex items-center justify-center w-10 h-10 rounded-full bg-vc-channel hover:bg-vc-hover text-vc-text transition">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1231,7 +1237,7 @@ async function toggleMute() {
         const useWs = (typeof USE_WS_MEDIA !== 'undefined' && USE_WS_MEDIA);
         try {
             if (!useWs && peerConnection) {
-                try { cleanupWebRTC(); } catch (_) {}
+                try { preservingRecordingState(cleanupWebRTC); } catch (_) {}
             }
             if (useWs) {
                 await startWSMedia();
@@ -2889,7 +2895,7 @@ function rebuildWebRTC(rejoin) {
     const wasScreenSharing = isScreenSharing;
     const callID = activeCallChannelID;
     const callName = activeCallChannelName;
-    cleanupWebRTC();
+    preservingRecordingState(cleanupWebRTC);
     currentChannelID = chID;
     activeCallChannelID = callID;
     activeCallChannelName = callName;
@@ -2902,6 +2908,7 @@ function rebuildWebRTC(rejoin) {
 
 function cleanupWebRTC() {
     stopWSMedia();
+    resetRecordingState();
     activeCallChannelID = null;
     activeCallChannelName = null;
     _stashedCallNodes = null;
@@ -3860,6 +3867,7 @@ function renderChannelChatOnly(channelID, displayName, opts) {
                 ${avatar}
                 <h2 class="text-base md:text-xl font-bold truncate flex-1">${safeName}</h2>
                 ${returnPill}
+                ${isDM ? '' : recordingsButtonHTML(channelID)}
                 <button onclick="leaveChannel()" class="px-3 py-1.5 bg-vc-channel hover:bg-vc-hover text-vc-muted hover:text-vc-text text-xs md:text-sm rounded-lg transition" title="Close">
                     Close
                 </button>

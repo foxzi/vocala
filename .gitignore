@@ -15,6 +15,7 @@ nginx/certs/
 .env
 config.yaml
 dist/
+/storage/
 .playwright-mcp/
 CLAUDE.md
 .nemo/

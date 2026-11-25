@@ -40,6 +40,9 @@
     window.VOCALA_GUEST_NAME = {{toJSON .GuestName}};
     window.VOCALA_GUEST_TOKEN = {{toJSON .GuestToken}};
     window.VOCALA_GUEST_CHANNEL_NAME = {{toJSON .ChannelName}};
+    window.VOCALA_RECORDING = {{.RecordingEnabled}};
+    window.VOCALA_RECORDING_DAYS = {{.RecordingRetentionDays}};
 </script>
+<script src="/static/js/recording.js?v={{.CacheBust}}"></script>
 <script src="/static/js/app.js?v={{.CacheBust}}"></script>
 {{end}}

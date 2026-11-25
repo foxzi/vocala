@@ -153,7 +153,10 @@
     window.VOCALA_ICE_SERVERS = {{toJSON .ICEServers}};
     window.VOCALA_AUTO_JOIN = {{toJSON .AutoJoinChannel}};
     window.VOCALA_IS_ADMIN = {{.User.IsAdmin}};
+    window.VOCALA_RECORDING = {{.RecordingEnabled}};
+    window.VOCALA_RECORDING_DAYS = {{.RecordingRetentionDays}};
 </script>
+<script src="/static/js/recording.js?v={{.CacheBust}}"></script>
 <script src="/static/js/app.js?v={{.CacheBust}}"></script>
 {{end}}
 

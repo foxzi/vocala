@@ -63,3 +63,16 @@ oauth:
 
 security:
   allowed_origins: []       # Empty = same-origin only. Add domains for CORS.
+
+# Where finished files (call recordings) are kept.
+storage:
+  backend: "local"          # only "local" for now; S3 is planned
+  local:
+    dir: ""                 # VOCALA_STORAGE_DIR; empty = "storage" next to the database file
+
+# Server-side call recording: one Ogg/Opus file per participant.
+recording:
+  enabled: true             # VOCALA_RECORDING=false disables it
+  tmp_dir: ""               # files being written; default <storage.local.dir>/tmp
+  max_hours: 4              # stop a forgotten recording (0 = no limit)
+  retention_days: 30        # delete older recordings (0 = keep forever)
