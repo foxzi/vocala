@@ -75,7 +75,7 @@ Env vars override YAML settings:
 
 Any participant can start recording a call with the record button; everyone in the call sees a "REC" indicator, and people who join later are told the call is being recorded. The server writes each participant's audio to its own Ogg/Opus file without re-encoding. Recording stops when someone presses the button again, when the last participant leaves, or after `max_hours`. Channel members find recordings under **Recordings** in the channel header. Design: [ADR-0001](adr/0001-recording-and-transcription.md).
 
-Android clients that send audio over WebSocket are not recorded yet.
+Not recorded yet: the WebSocket audio fallback (an Android client that joined without a microphone and turned it on later). Regular Android calls use WebRTC and are recorded.
 
 ### Examples
 
@@ -186,7 +186,7 @@ Vocala настраивается через файл `config.yaml` и/или п
 
 Запись включает любой участник кнопкой записи; у всех в звонке горит индикатор «REC», а вошедшим позже сообщается, что идёт запись. Сервер пишет звук каждого участника в свой файл Ogg/Opus без перекодирования. Запись останавливается кнопкой, когда звонок покинул последний участник, или через `max_hours`. Записи канала — кнопка **Recordings** в шапке канала. Решение — [ADR-0001](adr/0001-recording-and-transcription.md).
 
-Android-клиенты, которые шлют звук через WebSocket, пока не записываются.
+Пока не записывается запасной путь через WebSocket (Android-клиент вошёл без микрофона и включил его позже). Обычные звонки с Android идут через WebRTC и записываются.
 
 ### Примеры
 
