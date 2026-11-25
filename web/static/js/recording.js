@@ -145,6 +145,14 @@ function formatRecordingDuration(ms) {
 
 // --- Recordings list ---
 
+async function refreshRecordings(body) {
+    if (!document.body.contains(body)) return; // modal closed
+    try {
+        const res = await fetch(`/api/recordings?channel_id=${encodeURIComponent(body.dataset.channelId)}`, { credentials: 'same-origin' });
+        if (res.ok) renderRecordingsList(body, await res.json());
+    } catch (_) {}
+}
+
 async function openRecordings(channelID) {
     const existing = document.getElementById('recordings-modal');
     if (existing) existing.remove();
@@ -174,6 +182,7 @@ async function openRecordings(channelID) {
     document.body.appendChild(modal);
 
     const body = modal.querySelector('#recordings-body');
+    body.dataset.channelId = channelID;
     try {
         const res = await fetch(`/api/recordings?channel_id=${encodeURIComponent(channelID)}`, { credentials: 'same-origin' });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -184,7 +193,14 @@ async function openRecordings(channelID) {
     }
 }
 
+// While a transcript is being made, the open list refreshes itself.
+let recordingsPoll = null;
+
 function renderRecordingsList(body, recordings) {
+    clearTimeout(recordingsPoll);
+    if (recordings.some(r => r.transcript_status === 'pending' || r.transcript_status === 'running')) {
+        recordingsPoll = setTimeout(() => refreshRecordings(body), 10000);
+    }
     if (!recordings.length) {
         body.textContent = 'No recordings yet. Start one with the record button in a call.';
         return;
@@ -225,8 +241,75 @@ function renderRecording(rec) {
         for (const seg of rec.segments) {
             list.appendChild(renderSegment(rec, seg));
         }
+        if (window.VOCALA_TRANSCRIPTION && rec.segments.length) {
+            card.appendChild(renderTranscriptBlock(rec));
+        }
     }
     return card;
+}
+
+// --- Transcript ---
+
+function renderTranscriptBlock(rec) {
+    const block = document.createElement('div');
+    block.className = 'mt-3 pt-2 border-t border-vc-border text-xs flex flex-wrap items-center gap-2';
+    const status = rec.transcript_status;
+    const button = (label, act) =>
+        `<button data-act="${act}" class="px-2 py-1 rounded border border-vc-border hover:bg-vc-hover text-vc-text transition">${label}</button>`;
+    if (status === 'pending' || status === 'running') {
+        block.innerHTML = `<span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-vc-yellow animate-pulse"></span>Transcribing…</span>`;
+    } else if (status === 'ready') {
+        block.innerHTML = `<span>Transcript</span>${button('Show', 'show')}
+            <a href="/api/recordings/transcript?recording_id=${rec.id}&download=1" class="text-vc-accent hover:underline">Download .md</a>
+            <pre data-text class="hidden w-full mt-2 p-2 rounded bg-vc-bg border border-vc-border whitespace-pre-wrap font-sans text-sm text-vc-text max-h-80 overflow-y-auto"></pre>`;
+    } else {
+        const failed = status === 'failed';
+        block.innerHTML = `${failed ? '<span class="text-vc-yellow">Transcription failed.</span>' : '<span>No transcript.</span>'}
+            ${button(failed ? 'Try again' : 'Transcribe', 'transcribe')}`;
+    }
+    block.querySelector('[data-act="show"]')?.addEventListener('click', (e) => toggleTranscript(rec, block, e.target));
+    block.querySelector('[data-act="transcribe"]')?.addEventListener('click', () => queueTranscript(rec, block));
+    return block;
+}
+
+async function toggleTranscript(rec, block, btn) {
+    const pre = block.querySelector('[data-text]');
+    if (!pre.classList.contains('hidden')) {
+        pre.classList.add('hidden');
+        btn.textContent = 'Show';
+        return;
+    }
+    if (!pre.dataset.loaded) {
+        pre.textContent = 'Loading…';
+        pre.classList.remove('hidden');
+        try {
+            const res = await fetch(`/api/recordings/transcript?recording_id=${rec.id}`, { credentials: 'same-origin' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            pre.textContent = await res.text();
+            pre.dataset.loaded = '1';
+        } catch (err) {
+            console.error('Failed to load transcript:', err);
+            pre.textContent = 'Failed to load the transcript.';
+            return;
+        }
+    }
+    pre.classList.remove('hidden');
+    btn.textContent = 'Hide';
+}
+
+async function queueTranscript(rec, block) {
+    const form = new FormData();
+    form.append('recording_id', rec.id);
+    form.append('csrf_token', getCSRFToken());
+    try {
+        const res = await fetch('/api/recordings/transcribe', { method: 'POST', body: form, credentials: 'same-origin' });
+        if (!res.ok && res.status !== 409) throw new Error(`HTTP ${res.status}`);
+        const body = document.getElementById('recordings-body');
+        if (body) refreshRecordings(body);
+    } catch (err) {
+        console.error('Failed to queue transcription:', err);
+        block.querySelector('button').textContent = 'Failed, try again';
+    }
 }
 
 function renderSegment(rec, seg) {

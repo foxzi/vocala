@@ -678,6 +678,8 @@ func main() {
 	mux.HandleFunc("/api/groups", requireAuth(handleListGroups))
 	mux.HandleFunc("/api/recordings", requireAuth(handleRecordings))
 	mux.HandleFunc("/api/recordings/audio", requireAuth(handleRecordingAudio))
+	mux.HandleFunc("/api/recordings/transcript", requireAuth(handleRecordingTranscript))
+	mux.HandleFunc("/api/recordings/transcribe", requireAuth(csrfProtect(handleRecordingTranscribe)))
 	mux.HandleFunc("/account/password", requireAuth(csrfProtect(handleChangePassword)))
 
 	// Guest routes
@@ -729,6 +731,7 @@ func main() {
 	if recorder != nil {
 		// Finish files of calls still being recorded.
 		recorder.StopAll()
+		stopTranscription()
 	}
 	logger.Info("Server stopped")
 }
@@ -978,6 +981,7 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 		"AutoJoinChannel":        autoJoinChannel,
 		"RecordingEnabled":       recorder != nil,
 		"RecordingRetentionDays": cfg.Recording.RetentionDays,
+		"TranscriptionEnabled":   transcriber != nil,
 	}
 	templates["app.html"].ExecuteTemplate(w, "layout.html", data)
 }
@@ -1682,6 +1686,7 @@ func handleGuestApp(w http.ResponseWriter, r *http.Request) {
 		"ICEServers":             iceServers,
 		"RecordingEnabled":       recorder != nil,
 		"RecordingRetentionDays": cfg.Recording.RetentionDays,
+		"TranscriptionEnabled":   transcriber != nil,
 		"CacheBust":              cacheBust,
 	})
 }

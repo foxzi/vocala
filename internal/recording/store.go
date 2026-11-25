@@ -20,6 +20,10 @@ type Recording struct {
 	EndedAt   int64     `json:"ended_at"`   // unix ms, 0 while recording
 	Status    string    `json:"status"`
 	Segments  []Segment `json:"segments"`
+
+	// TranscriptStatus is "" (never transcribed), pending, running, ready
+	// or failed.
+	TranscriptStatus string `json:"transcript_status"`
 }
 
 // Segment is one participant's continuous piece of audio.
@@ -37,7 +41,7 @@ type Segment struct {
 // that are already in storage.
 func (m *Manager) List(channelID int64, limit int) ([]Recording, error) {
 	rows, err := m.db.Query(
-		`SELECT id, channel_id, started_by_name, started_at_ms, ended_at_ms, status
+		`SELECT id, channel_id, started_by_name, started_at_ms, ended_at_ms, status, transcript_status
 		 FROM recordings WHERE channel_id = ? ORDER BY started_at_ms DESC LIMIT ?`,
 		channelID, limit,
 	)
@@ -47,7 +51,7 @@ func (m *Manager) List(channelID int64, limit int) ([]Recording, error) {
 	var out []Recording
 	for rows.Next() {
 		var r Recording
-		if err := rows.Scan(&r.ID, &r.ChannelID, &r.StartedBy, &r.StartedAt, &r.EndedAt, &r.Status); err != nil {
+		if err := rows.Scan(&r.ID, &r.ChannelID, &r.StartedBy, &r.StartedAt, &r.EndedAt, &r.Status, &r.TranscriptStatus); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -158,6 +162,9 @@ func (m *Manager) delete(recordingID int64) error {
 		}
 	}
 	rows.Close()
+	// The fixed key, not the column: a transcript being stored right now
+	// is not in the column yet.
+	keys = append(keys, transcriptKey(recordingID))
 	for _, k := range keys {
 		if err := m.blobs.Delete(context.Background(), k); err != nil {
 			return err
@@ -176,15 +183,15 @@ func (m *Manager) delete(recordingID int64) error {
 // to the last written page; the file's modification time stands in for the
 // end, since the RTP timestamps died with the process.
 func (m *Manager) RecoverInterrupted() error {
-	rows, err := m.db.Query(`SELECT id, started_at_ms FROM recordings WHERE status = ?`, StatusRecording)
+	rows, err := m.db.Query(`SELECT id, channel_id, started_at_ms FROM recordings WHERE status = ?`, StatusRecording)
 	if err != nil {
 		return err
 	}
-	type rec struct{ id, startedAt int64 }
+	type rec struct{ id, channelID, startedAt int64 }
 	var recs []rec
 	for rows.Next() {
 		var r rec
-		if err := rows.Scan(&r.id, &r.startedAt); err == nil {
+		if err := rows.Scan(&r.id, &r.channelID, &r.startedAt); err == nil {
 			recs = append(recs, r)
 		}
 	}
@@ -232,6 +239,7 @@ func (m *Manager) RecoverInterrupted() error {
 			_ = os.Remove(m.sessionTmpDir(r.id))
 		}
 		logger.Info("recording: recovered interrupted recording %d (%s)", r.id, status)
+		m.recorded(r.channelID, r.id)
 	}
 	return nil
 }
