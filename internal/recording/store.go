@@ -101,7 +101,7 @@ func (m *Manager) SegmentChannel(recordingID, segmentID int64) (int64, error) {
 	return channelID, err
 }
 
-// OpenSegment returns the segment's audio and its format ("ogg").
+// OpenSegment returns the segment's audio and its format (ogg, webm, mp4).
 func (m *Manager) OpenSegment(ctx context.Context, recordingID, segmentID int64) (io.ReadCloser, string, error) {
 	var key, format string
 	err := m.db.QueryRow(

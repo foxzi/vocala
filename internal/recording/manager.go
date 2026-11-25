@@ -125,6 +125,13 @@ type session struct {
 	streams  map[string]string   // WebSocket streams announced, waiting for their first chunk: key -> format
 	headless int                 // chunks of streams that started before the recording
 
+	// lost marks WebSocket streams that lost a chunk or an announcement on
+	// the way (full queue, rate limit). Raw WebM cannot skip bytes, so the
+	// writer closes the file there and waits for the next stream. Written by
+	// producers, hence the mutex.
+	lostMu sync.Mutex
+	lost   map[string]bool
+
 	pending sync.WaitGroup // segments being moved to storage
 	failed  atomic.Bool
 }
@@ -162,6 +169,7 @@ func (m *Manager) Start(channelID, userID int64, username string) (State, error)
 		queue:    make(chan event, queueSize),
 		segments: make(map[string]*segment), broken: make(map[string]bool),
 		streams: make(map[string]string),
+		lost:    make(map[string]bool),
 	}
 	if m.cfg.MaxDuration > 0 {
 		// Set before s is published: end reads s.limit from another goroutine.
@@ -298,8 +306,33 @@ func (m *Manager) MediaStreamStarted(channelID int64, streamKey, format string) 
 		case s.queue <- event{trackKey: streamKey, format: format}:
 		default:
 			s.dropped.Add(1)
+			s.markLost(streamKey)
 		}
 	}
+}
+
+// MediaChunkLost reports a chunk of streamKey that was dropped before it
+// reached the recorder.
+func (m *Manager) MediaChunkLost(channelID int64, streamKey string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if s := m.active[channelID]; s != nil {
+		s.markLost(streamKey)
+	}
+}
+
+func (s *session) markLost(key string) {
+	s.lostMu.Lock()
+	s.lost[key] = true
+	s.lostMu.Unlock()
+}
+
+func (s *session) takeLost(key string) bool {
+	s.lostMu.Lock()
+	defer s.lostMu.Unlock()
+	lost := s.lost[key]
+	delete(s.lost, key)
+	return lost
 }
 
 // MediaChunk receives one chunk of a MediaRecorder stream that a mobile
@@ -317,6 +350,7 @@ func (m *Manager) MediaChunk(channelID, userID int64, username, streamKey string
 	case s.queue <- ev:
 	default:
 		s.dropped.Add(1)
+		s.markLost(streamKey)
 	}
 }
 
@@ -418,6 +452,21 @@ func (m *Manager) startStream(s *session, ev event) {
 // writeChunk appends a MediaRecorder chunk. Chunks of a stream that began
 // before the recording are dropped: they lack the container header.
 func (m *Manager) writeChunk(s *session, ev event) {
+	if s.broken[ev.trackKey] {
+		return
+	}
+	if s.takeLost(ev.trackKey) {
+		// Something before this chunk never arrived: keep the file valid
+		// up to the gap and drop the rest of this stream.
+		if seg, ok := s.segments[ev.trackKey]; ok {
+			delete(s.segments, ev.trackKey)
+			m.finish(s, seg)
+		}
+		delete(s.streams, ev.trackKey)
+		logger.Warn("recording: %d: WebSocket audio of user %d lost a chunk, the rest of this stream is not recorded", s.id, ev.userID)
+		s.headless++
+		return
+	}
 	seg := s.segments[ev.trackKey]
 	if seg == nil {
 		format, announced := s.streams[ev.trackKey]
@@ -455,8 +504,9 @@ func (m *Manager) complete(s *session) {
 		logger.Warn("recording: %d: dropped %d packets, the writer fell behind", s.id, n)
 	}
 	if s.headless > 0 {
-		// One is normal: the last chunk of the recorder the client stops on
-		// ws_media_restart. Many mean a client that does not restart.
+		// A few are normal: chunks of the old recorder that arrive between
+		// the start and the client's restart. Many mean a client that does
+		// not restart (old page) or a stream that lost a chunk.
 		logger.Info("recording: %d: skipped %d WebSocket chunks of streams that began before the recording", s.id, s.headless)
 	}
 	defer os.Remove(m.sessionTmpDir(s.id))

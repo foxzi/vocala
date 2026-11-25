@@ -4541,14 +4541,16 @@ function restartWSAudioSend() {
     // Start the new recorder only after the old one flushed its last chunk,
     // so no chunk of the old stream lands after the new header.
     rec.onstop = () => {
-        if (wsMediaRecorder === rec) startWSAudioSend(processedStream);
+        if (wsMediaRecorder === rec && processedStream) startWSAudioSend(processedStream);
     };
     rec.stop();
 }
 
 function stopWSMedia() {
-    if (wsMediaRecorder && wsMediaRecorder.state !== 'inactive') {
-        wsMediaRecorder.stop();
+    if (wsMediaRecorder) {
+        // Also cancels a restart in flight (stop() already called, onstop pending).
+        wsMediaRecorder.onstop = null;
+        if (wsMediaRecorder.state !== 'inactive') wsMediaRecorder.stop();
         wsMediaRecorder = null;
     }
     // Clean up remote audio elements

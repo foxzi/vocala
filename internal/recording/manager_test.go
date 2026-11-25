@@ -470,3 +470,39 @@ func TestFormatForMIME(t *testing.T) {
 		}
 	}
 }
+
+// Raw WebM cannot skip bytes: after a lost chunk the file ends there and
+// the stream is not recorded until the client starts a new one.
+func TestLostWebSocketChunkClosesStream(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.m.Start(1, 1, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	f.m.MediaStreamStarted(1, "ws-5", "webm")
+	f.m.MediaChunk(1, 5, "phone", "ws-5", []byte("h1"))
+	f.m.MediaChunk(1, 5, "phone", "ws-5", []byte("a"))
+	waitFor(t, func() bool { // let the writer take both chunks
+		entries, _ := os.ReadDir(f.m.sessionTmpDir(1))
+		return len(entries) == 1
+	})
+	time.Sleep(50 * time.Millisecond)
+	f.m.MediaChunkLost(1, "ws-5")
+	f.m.MediaChunk(1, 5, "phone", "ws-5", []byte("c")) // after the gap: dropped
+	f.m.MediaStreamStarted(1, "ws-5", "webm")
+	f.m.MediaChunk(1, 5, "phone", "ws-5", []byte("h2"))
+
+	list := stopAndList(t, f.m, 1)
+	var got []string
+	for _, seg := range list[0].Segments {
+		rc, _, err := f.m.OpenSegment(context.Background(), list[0].ID, seg.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(rc)
+		rc.Close()
+		got = append(got, string(data))
+	}
+	if len(got) != 2 || got[0] != "h1a" || got[1] != "h2" {
+		t.Fatalf("segments = %q, want [h1a h2]", got)
+	}
+}
